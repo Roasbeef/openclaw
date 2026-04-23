@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildKeybaseDmTarget,
+  buildKeybaseGroupTarget,
+  buildKeybaseInboundGroupId,
   inferKeybaseInboundChatType,
   inferKeybaseTargetChatType,
   normalizeKeybaseAllowEntry,
+  normalizeKeybaseGroupKey,
   normalizeKeybaseUsername,
   normalizeKeybaseTarget,
   parseKeybaseTarget,
@@ -59,5 +62,18 @@ describe("Keybase target parsing", () => {
         channel: { membersType: "team", topicName: "ops" },
       }),
     ).toBe("group");
+  });
+
+  it("canonicalizes group routing keys separately from outbound targets", () => {
+    expect(buildKeybaseGroupTarget("LightningLabs", "Ops")).toBe("team:LightningLabs#Ops");
+    expect(normalizeKeybaseGroupKey("team:LightningLabs#Ops")).toBe("team:lightninglabs#ops");
+    expect(
+      buildKeybaseInboundGroupId({
+        channel: {
+          name: "LightningLabs",
+          topicName: "Ops",
+        },
+      }),
+    ).toBe("team:LightningLabs#Ops");
   });
 });

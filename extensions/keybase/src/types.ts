@@ -14,6 +14,14 @@ export type CoreConfig = {
   };
 };
 
+export interface ResolvedKeybaseGroupConfig {
+  allowFrom: string[];
+  enabled?: boolean;
+  requireMention?: boolean;
+  skills?: string[];
+  systemPrompt?: string;
+}
+
 export interface ResolvedKeybaseAccount {
   accountId: string;
   allowFrom: string[];
@@ -24,6 +32,8 @@ export interface ResolvedKeybaseAccount {
   dmPolicy: "open" | "allowlist" | "pairing" | "disabled";
   enableTyping: boolean;
   enabled: boolean;
+  groupPolicy: "open" | "allowlist" | "disabled";
+  groups: Record<string, ResolvedKeybaseGroupConfig>;
   homeDir?: string;
   name?: string;
   paperKey?: string;

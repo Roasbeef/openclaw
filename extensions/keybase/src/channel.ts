@@ -9,6 +9,8 @@ import {
   buildChannelOutboundSessionRoute,
   createChatChannelPlugin,
 } from "openclaw/plugin-sdk/channel-core";
+import { createOpenProviderConfiguredRouteWarningCollector } from "openclaw/plugin-sdk/channel-policy";
+import { createResolvedDirectoryEntriesLister } from "openclaw/plugin-sdk/directory-runtime";
 import {
   buildPassiveChannelStatusSummary,
   buildTrafficStatusSummary,
@@ -26,6 +28,7 @@ import {
 } from "./accounts.js";
 import { KeybaseChannelConfigSchema } from "./config-schema.js";
 import { keybaseGatewayAdapter } from "./gateway.js";
+import { resolveKeybaseGroupMatch, resolveKeybaseGroupRequireMention } from "./groups.js";
 import { sendKeybaseMedia, sendKeybaseText } from "./runtime.js";
 import { applyKeybaseSetup } from "./setup.js";
 import {
@@ -33,6 +36,7 @@ import {
   inferKeybaseTargetChatType,
   looksLikeKeybaseTargetId,
   normalizeKeybaseAllowEntry,
+  normalizeKeybaseGroupKey,
   normalizeKeybaseTarget,
   parseKeybaseTarget,
 } from "./targets.js";
@@ -78,6 +82,8 @@ const keybaseConfigAdapter = createScopedChannelConfigAdapter<
     "defaultTo",
     "allowFrom",
     "dmPolicy",
+    "groupPolicy",
+    "groups",
   ],
   resolveAllowFrom: (account) => account.allowFrom,
   formatAllowFrom: (allowFrom) =>
@@ -107,6 +113,46 @@ const keybaseStatusAdapter = createComputedAccountStatusAdapter<ResolvedKeybaseA
     },
   }),
 });
+
+const listKeybaseDirectoryPeersFromConfig =
+  createResolvedDirectoryEntriesLister<ResolvedKeybaseAccount>({
+    kind: "user",
+    resolveAccount: (cfg, accountId) =>
+      resolveKeybaseAccount({ cfg: cfg as CoreConfig, accountId }),
+    resolveSources: (account) => [
+      account.allowFrom,
+      ...Object.values(account.groups).map((group) => group.allowFrom),
+    ],
+    normalizeId: (entry) => normalizeKeybaseAllowEntry(entry) ?? null,
+  });
+
+const listKeybaseDirectoryGroupsFromConfig =
+  createResolvedDirectoryEntriesLister<ResolvedKeybaseAccount>({
+    kind: "group",
+    resolveAccount: (cfg, accountId) =>
+      resolveKeybaseAccount({ cfg: cfg as CoreConfig, accountId }),
+    resolveSources: (account) => [Object.keys(account.groups)],
+    normalizeId: (entry) => normalizeKeybaseGroupKey(entry) ?? null,
+  });
+
+const collectKeybaseGroupPolicyWarnings =
+  createOpenProviderConfiguredRouteWarningCollector<ResolvedKeybaseAccount>({
+    providerConfigPresent: (cfg) => cfg.channels?.keybase !== undefined,
+    resolveGroupPolicy: (account) => account.groupPolicy,
+    resolveRouteAllowlistConfigured: (account) => Object.keys(account.groups).length > 0,
+    configureRouteAllowlist: {
+      surface: "Keybase team chats",
+      openScope: "any team chat not explicitly denied",
+      groupPolicyPath: "channels.keybase.groupPolicy",
+      routeAllowlistPath: "channels.keybase.groups",
+    },
+    missingRouteAllowlist: {
+      surface: "Keybase team chats",
+      openBehavior: "with no team/topic allowlist; any team chat can trigger (mention-gated)",
+      remediation:
+        'Set channels.keybase.groupPolicy="allowlist" and configure channels.keybase.groups',
+    },
+  });
 
 export const keybasePlugin = createChatChannelPlugin({
   base: {
@@ -138,8 +184,42 @@ export const keybasePlugin = createChatChannelPlugin({
             username: account.username,
             homeDir: account.homeDir,
             dmPolicy: account.dmPolicy,
+            groupPolicy: account.groupPolicy,
           },
         }),
+    },
+    groups: {
+      resolveRequireMention: ({ cfg, groupId, groupSpace, groupChannel, accountId }) => {
+        const account = resolveKeybaseAccount({ cfg: cfg as CoreConfig, accountId });
+        const resolvedGroupId =
+          normalizeKeybaseGroupKey(groupId ?? "") ??
+          normalizeKeybaseGroupKey(
+            groupSpace && groupChannel ? `team:${groupSpace}#${groupChannel}` : "",
+          );
+        if (!resolvedGroupId) {
+          return undefined;
+        }
+        const groupMatch = resolveKeybaseGroupMatch({
+          groups: account.groups,
+          groupId: resolvedGroupId,
+        });
+        return resolveKeybaseGroupRequireMention(groupMatch);
+      },
+    },
+    directory: {
+      self: async ({ cfg, accountId }) => {
+        const account = resolveKeybaseAccount({ cfg: cfg as CoreConfig, accountId });
+        if (!account.username) {
+          return null;
+        }
+        return {
+          kind: "user",
+          id: account.username,
+          name: account.name,
+        };
+      },
+      listPeers: async (params) => listKeybaseDirectoryPeersFromConfig(params),
+      listGroups: async (params) => listKeybaseDirectoryGroupsFromConfig(params),
     },
     messaging: {
       normalizeTarget: normalizeKeybaseTarget,
@@ -170,7 +250,10 @@ export const keybasePlugin = createChatChannelPlugin({
           accountId,
           peer: {
             kind: parsed.chatType === "direct" ? "direct" : "channel",
-            id: parsed.normalized,
+            id:
+              parsed.chatType === "group"
+                ? (normalizeKeybaseGroupKey(parsed.normalized) ?? parsed.normalized)
+                : parsed.normalized,
           },
           chatType: parsed.chatType,
           from: `keybase:${accountId ?? DEFAULT_ACCOUNT_ID}`,
@@ -209,6 +292,7 @@ export const keybasePlugin = createChatChannelPlugin({
       approveHint: "openclaw pairing approve keybase <username>",
       normalizeEntry: (raw) => normalizeKeybaseAllowEntry(raw) ?? raw.trim().toLowerCase(),
     }),
+    collectWarnings: collectKeybaseGroupPolicyWarnings,
   },
   outbound: {
     deliveryMode: "direct",

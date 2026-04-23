@@ -2,8 +2,19 @@ import {
   AllowFromListSchema,
   buildChannelConfigSchema,
   DmPolicySchema,
+  GroupPolicySchema,
 } from "openclaw/plugin-sdk/channel-config-primitives";
 import { z } from "openclaw/plugin-sdk/zod";
+
+export const KeybaseGroupConfigSchema = z
+  .object({
+    allowFrom: AllowFromListSchema,
+    enabled: z.boolean().optional(),
+    requireMention: z.boolean().optional(),
+    skills: z.array(z.string()).optional(),
+    systemPrompt: z.string().optional(),
+  })
+  .strict();
 
 export const KeybaseAccountConfigSchema = z
   .object({
@@ -18,6 +29,8 @@ export const KeybaseAccountConfigSchema = z
     paperKeyFile: z.string().optional(),
     enableTyping: z.boolean().optional(),
     defaultTo: z.string().optional(),
+    groupPolicy: GroupPolicySchema.optional(),
+    groups: z.record(z.string(), KeybaseGroupConfigSchema).optional(),
   })
   .strict();
 

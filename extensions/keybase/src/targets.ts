@@ -43,6 +43,15 @@ export function buildKeybaseDmTarget(username: string): string | null {
   return normalized ? `dm:${normalized}` : null;
 }
 
+export function buildKeybaseGroupTarget(teamName: string, topicName: string): string | null {
+  const normalizedTeam = teamName.trim();
+  const normalizedTopic = topicName.trim();
+  if (!normalizedTeam || !normalizedTopic) {
+    return null;
+  }
+  return `team:${normalizedTeam}#${normalizedTopic}`;
+}
+
 export function parseKeybaseTarget(raw: string): ParsedKeybaseTarget | null {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -107,6 +116,17 @@ export function normalizeKeybaseTarget(raw: string): string | undefined {
   return parseKeybaseTarget(raw)?.normalized;
 }
 
+export function normalizeKeybaseGroupKey(raw: string): string | undefined {
+  if (raw.trim() === "*") {
+    return "*";
+  }
+  const parsed = parseKeybaseTarget(raw);
+  if (!parsed || parsed.chatType !== "group" || !parsed.teamName || !parsed.topicName) {
+    return undefined;
+  }
+  return `team:${parsed.teamName.trim().toLowerCase()}#${parsed.topicName.trim().toLowerCase()}`;
+}
+
 export function inferKeybaseTargetChatType(raw: string): "direct" | "group" | undefined {
   return parseKeybaseTarget(raw)?.chatType;
 }
@@ -154,4 +174,16 @@ export function inferKeybaseInboundChatType(params: {
     return "group";
   }
   return "direct";
+}
+
+export function buildKeybaseInboundGroupId(params: {
+  channel: {
+    name: string;
+    topicName?: string;
+  };
+}): string | undefined {
+  if (!params.channel.name || !params.channel.topicName) {
+    return undefined;
+  }
+  return buildKeybaseGroupTarget(params.channel.name, params.channel.topicName) ?? undefined;
 }

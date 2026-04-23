@@ -12,6 +12,8 @@ const account: ResolvedKeybaseAccount = {
   dmPolicy: "pairing",
   enableTyping: true,
   enabled: true,
+  groupPolicy: "allowlist",
+  groups: {},
   homeDir: "/tmp/keybase-home",
   username: "openclaw-bot",
   paperKey: "paper key words",

@@ -1,16 +1,41 @@
 import { isNormalizedSenderAllowed } from "openclaw/plugin-sdk/allow-from";
 import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
-import type { EnvelopeFormatOptions } from "openclaw/plugin-sdk/channel-inbound";
+import {
+  buildMentionRegexes,
+  matchesMentionPatterns,
+  resolveInboundMentionDecision,
+  type EnvelopeFormatOptions,
+} from "openclaw/plugin-sdk/channel-inbound";
 import { createAccountStatusSink } from "openclaw/plugin-sdk/channel-lifecycle";
 import { createChannelPairingChallengeIssuer } from "openclaw/plugin-sdk/channel-pairing";
+import {
+  hasControlCommand,
+  resolveSenderCommandAuthorizationWithRuntime,
+  shouldHandleTextCommands,
+} from "openclaw/plugin-sdk/command-auth";
 import { dispatchInboundDirectDmWithRuntime } from "openclaw/plugin-sdk/direct-dm";
 import { resolveInboundDirectDmAccessWithRuntime } from "openclaw/plugin-sdk/direct-dm-access";
 import { runStoppablePassiveMonitor } from "openclaw/plugin-sdk/extension-shared";
+import { resolveOpenProviderRuntimeGroupPolicy } from "openclaw/plugin-sdk/group-access";
+import { dispatchInboundReplyWithBase } from "openclaw/plugin-sdk/inbound-reply-dispatch";
 import { startKeybaseApiListen } from "./client.js";
+import {
+  resolveKeybaseGroupAccess,
+  resolveKeybaseGroupAllowFrom,
+  resolveKeybaseGroupMatch,
+  resolveKeybaseGroupRequireMention,
+  resolveKeybaseGroupSkillFilter,
+  resolveKeybaseGroupSystemPrompt,
+} from "./groups.js";
 import type { KeybaseListenEvent } from "./listen.js";
 import { ensureKeybaseAccountPrepared, sendKeybaseText } from "./runtime.js";
-import { inferKeybaseInboundChatType, normalizeKeybaseUsername } from "./targets.js";
+import {
+  buildKeybaseInboundGroupId,
+  inferKeybaseInboundChatType,
+  normalizeKeybaseGroupKey,
+  normalizeKeybaseUsername,
+} from "./targets.js";
 import type { ResolvedKeybaseAccount } from "./types.js";
 
 type KeybaseChannelRuntime = {
@@ -49,7 +74,7 @@ type KeybaseChannelRuntime = {
       cfg: ChannelGatewayContext["cfg"];
       channel: string;
       accountId: string;
-      peer: { kind: "direct"; id: string };
+      peer: { kind: "direct" | "channel"; id: string };
     }) => { agentId: string; accountId?: string; sessionKey: string };
   };
   session: {
@@ -83,6 +108,48 @@ function resolveKeybaseChannelRuntime(
     throw new Error("Keybase inbound runtime is unavailable (missing channelRuntime)");
   }
   return ctx.channelRuntime as unknown as KeybaseChannelRuntime;
+}
+
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function resolveKeybaseGroupMentionState(params: {
+  account: ResolvedKeybaseAccount;
+  cfg: ChannelGatewayContext["cfg"];
+  message: NonNullable<Extract<KeybaseListenEvent, { type: "chat" }>["message"]>;
+  rawBody: string;
+}): {
+  canDetectMention: boolean;
+  hasAnyMention: boolean;
+  wasMentioned: boolean;
+} {
+  const mentionRegexes = buildMentionRegexes(params.cfg);
+  const normalizedMentions = params.message.atMentionUsernames
+    .map((entry) => normalizeKeybaseUsername(entry ?? ""))
+    .filter((entry): entry is string => Boolean(entry));
+  const accountUsername = normalizeKeybaseUsername(params.account.username ?? "");
+  const botUsername = normalizeKeybaseUsername(params.message.botUsername ?? "");
+  const explicitUsernames = [accountUsername, botUsername].filter((entry): entry is string =>
+    Boolean(entry),
+  );
+  const explicitMention = explicitUsernames.some((username) =>
+    new RegExp(`(^|\\W)@?${escapeRegexLiteral(username)}(?=\\W|$)`, "i").test(params.rawBody),
+  );
+  const nativeMention = explicitUsernames.some((username) => normalizedMentions.includes(username));
+  const patternMention = matchesMentionPatterns(params.rawBody, mentionRegexes);
+  const hasAnyMention =
+    normalizedMentions.length > 0 ||
+    explicitMention ||
+    patternMention ||
+    Boolean(params.message.channelMention?.trim());
+
+  return {
+    canDetectMention: true,
+    hasAnyMention,
+    wasMentioned:
+      nativeMention || explicitMention || patternMention || Boolean(params.message.channelMention),
+  };
 }
 
 async function handleDirectMessage(params: {
@@ -227,6 +294,237 @@ async function handleDirectMessage(params: {
   });
 }
 
+async function handleGroupMessage(params: {
+  account: ResolvedKeybaseAccount;
+  ctx: ChannelGatewayContext<ResolvedKeybaseAccount>;
+  event: Extract<KeybaseListenEvent, { type: "chat" }>;
+  statusSink: ReturnType<typeof createAccountStatusSink>;
+}) {
+  const message = params.event.message;
+  if (!message || message.content.type !== "text") {
+    return;
+  }
+
+  const senderId = normalizeKeybaseUsername(message.sender.username ?? "");
+  if (!senderId) {
+    params.ctx.log?.debug?.(
+      `[${params.account.accountId}] dropping Keybase group message without sender username`,
+    );
+    return;
+  }
+
+  const accountUsername = normalizeKeybaseUsername(params.account.username ?? "");
+  if (accountUsername && senderId === accountUsername) {
+    return;
+  }
+
+  const rawBody = message.content.text?.body ?? "";
+  const groupId =
+    normalizeKeybaseGroupKey(buildKeybaseInboundGroupId({ channel: message.channel }) ?? "") ??
+    undefined;
+  if (!groupId) {
+    params.ctx.log?.debug?.(
+      `[${params.account.accountId}] dropping Keybase group message without team/topic route`,
+    );
+    return;
+  }
+
+  const { groupPolicy } = resolveOpenProviderRuntimeGroupPolicy({
+    providerConfigPresent: params.ctx.cfg.channels?.keybase !== undefined,
+    groupPolicy: params.account.groupPolicy,
+    defaultGroupPolicy: params.ctx.cfg.channels?.defaults?.groupPolicy,
+  });
+  const groupMatch = resolveKeybaseGroupMatch({
+    groups: params.account.groups,
+    groupId,
+  });
+  const groupAccess = resolveKeybaseGroupAccess({
+    groupPolicy,
+    groupMatch,
+  });
+  if (!groupAccess.allowed) {
+    params.ctx.log?.debug?.(
+      `[${params.account.accountId}] blocked Keybase group ${groupId} (${groupAccess.reason})`,
+    );
+    return;
+  }
+
+  const groupAllowFrom = resolveKeybaseGroupAllowFrom(groupMatch);
+  if (
+    groupAllowFrom.length > 0 &&
+    !isNormalizedSenderAllowed({
+      senderId,
+      allowFrom: groupAllowFrom,
+    })
+  ) {
+    params.ctx.log?.debug?.(
+      `[${params.account.accountId}] blocked Keybase group sender ${senderId} for ${groupId}`,
+    );
+    return;
+  }
+
+  const channelRuntime = resolveKeybaseChannelRuntime(params.ctx);
+  const allowTextCommands = shouldHandleTextCommands({
+    cfg: params.ctx.cfg,
+    surface: "keybase",
+  });
+  const hasControlCommandInMessage = hasControlCommand(rawBody, params.ctx.cfg, {
+    botUsername: message.botUsername,
+  });
+  const commandAccess = await resolveSenderCommandAuthorizationWithRuntime({
+    cfg: params.ctx.cfg,
+    rawBody,
+    isGroup: true,
+    dmPolicy: params.account.dmPolicy,
+    configuredAllowFrom: params.account.allowFrom,
+    configuredGroupAllowFrom: groupAllowFrom,
+    senderId,
+    isSenderAllowed: (candidate, allowFrom) =>
+      isNormalizedSenderAllowed({
+        senderId: candidate,
+        allowFrom,
+      }),
+    readAllowFromStore: async () =>
+      await channelRuntime.pairing.readAllowFromStore({
+        channel: "keybase",
+        accountId: params.account.accountId,
+      }),
+    runtime: {
+      shouldComputeCommandAuthorized: channelRuntime.commands.shouldComputeCommandAuthorized,
+      resolveCommandAuthorizedFromAuthorizers:
+        channelRuntime.commands.resolveCommandAuthorizedFromAuthorizers,
+    },
+  });
+
+  const requireMention = resolveKeybaseGroupRequireMention(groupMatch);
+  const mentionState = resolveKeybaseGroupMentionState({
+    account: params.account,
+    cfg: params.ctx.cfg,
+    message,
+    rawBody,
+  });
+  const mentionDecision = resolveInboundMentionDecision({
+    facts: mentionState,
+    policy: {
+      isGroup: true,
+      requireMention,
+      allowTextCommands,
+      hasControlCommand: hasControlCommandInMessage,
+      commandAuthorized: commandAccess.commandAuthorized === true,
+    },
+  });
+  if (mentionDecision.shouldSkip) {
+    params.ctx.log?.debug?.(
+      `[${params.account.accountId}] skipped Keybase group ${groupId} (missing mention)`,
+    );
+    return;
+  }
+
+  const route = channelRuntime.routing.resolveAgentRoute({
+    cfg: params.ctx.cfg,
+    channel: "keybase",
+    accountId: params.account.accountId,
+    peer: {
+      kind: "channel",
+      id: groupId,
+    },
+  });
+  const storePath = channelRuntime.session.resolveStorePath(params.ctx.cfg.session?.store, {
+    agentId: route.agentId,
+  });
+  const previousTimestamp = channelRuntime.session.readSessionUpdatedAt({
+    storePath,
+    sessionKey: route.sessionKey,
+  });
+  const envelopeOptions = channelRuntime.reply.resolveEnvelopeFormatOptions(params.ctx.cfg);
+  const groupLabel = message.channel.topicName
+    ? `${message.channel.name}#${message.channel.topicName}`
+    : message.channel.name;
+  const body = channelRuntime.reply.formatAgentEnvelope({
+    channel: "Keybase",
+    from: groupLabel,
+    body: rawBody,
+    envelope: envelopeOptions,
+    previousTimestamp,
+    timestamp: message.sentAtMs ?? (message.sentAt ? message.sentAt * 1000 : undefined),
+  });
+  const ctxPayload = channelRuntime.reply.finalizeInboundContext({
+    Body: body,
+    RawBody: rawBody,
+    CommandBody: rawBody,
+    From: `keybase:group:${groupId}`,
+    To: `keybase:${groupId}`,
+    SessionKey: route.sessionKey,
+    AccountId: route.accountId,
+    ChatType: "group",
+    ConversationLabel: groupLabel,
+    SenderName: message.sender.username ?? undefined,
+    SenderId: senderId,
+    GroupSubject: groupLabel,
+    GroupChannel: message.channel.topicName ?? undefined,
+    GroupSpace: message.channel.name,
+    GroupSystemPrompt: resolveKeybaseGroupSystemPrompt(groupMatch),
+    Provider: "keybase",
+    Surface: "keybase",
+    WasMentioned: mentionDecision.effectiveWasMentioned,
+    MessageSid: String(message.id),
+    Timestamp: message.sentAtMs ?? (message.sentAt ? message.sentAt * 1000 : undefined),
+    OriginatingChannel: "keybase",
+    OriginatingTo: `keybase:${groupId}`,
+    CommandAuthorized: commandAccess.commandAuthorized,
+  });
+
+  params.statusSink({ lastInboundAt: Date.now() });
+  await dispatchInboundReplyWithBase({
+    cfg: params.ctx.cfg,
+    channel: "keybase",
+    accountId: params.account.accountId,
+    route,
+    storePath,
+    ctxPayload,
+    core: {
+      channel: {
+        session: {
+          recordInboundSession: channelRuntime.session.recordInboundSession as never,
+        },
+        reply: {
+          dispatchReplyWithBufferedBlockDispatcher:
+            channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher,
+        },
+      },
+    },
+    deliver: async (payload) => {
+      const text =
+        payload && typeof payload === "object" && "text" in payload
+          ? ((payload as { text?: string }).text ?? "")
+          : "";
+      if (!text.trim()) {
+        return;
+      }
+      await sendKeybaseText({
+        account: params.account,
+        to: buildConversationReplyTarget(message.conversationId),
+        text,
+        replyToId: String(message.id),
+      });
+      params.statusSink({ lastOutboundAt: Date.now() });
+    },
+    onRecordError: (error) => {
+      params.ctx.log?.error?.(
+        `[${params.account.accountId}] keybase session record failed for group ${groupId}: ${String(error)}`,
+      );
+    },
+    onDispatchError: (error, info) => {
+      params.ctx.log?.error?.(
+        `[${params.account.accountId}] keybase ${info.kind} reply failed for group ${groupId}: ${String(error)}`,
+      );
+    },
+    replyOptions: {
+      skillFilter: resolveKeybaseGroupSkillFilter(groupMatch),
+    },
+  });
+}
+
 async function handleKeybaseListenEvent(params: {
   account: ResolvedKeybaseAccount;
   ctx: ChannelGatewayContext<ResolvedKeybaseAccount>;
@@ -239,13 +537,16 @@ async function handleKeybaseListenEvent(params: {
   if (params.event.message.content.type !== "text") {
     return;
   }
-  if (inferKeybaseInboundChatType({ channel: params.event.message.channel }) !== "direct") {
-    params.ctx.log?.debug?.(
-      `[${params.account.accountId}] skipping Keybase group message until group inbound routing is wired`,
-    );
+  if (inferKeybaseInboundChatType({ channel: params.event.message.channel }) === "direct") {
+    await handleDirectMessage({
+      account: params.account,
+      ctx: params.ctx,
+      event: params.event,
+      statusSink: params.statusSink,
+    });
     return;
   }
-  await handleDirectMessage({
+  await handleGroupMessage({
     account: params.account,
     ctx: params.ctx,
     event: params.event,

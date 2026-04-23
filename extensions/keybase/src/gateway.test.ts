@@ -39,6 +39,8 @@ function buildAccount(overrides: Partial<ResolvedKeybaseAccount> = {}): Resolved
     dmPolicy: "pairing",
     enableTyping: false,
     enabled: true,
+    groupPolicy: "allowlist",
+    groups: {},
     homeDir: undefined,
     name: undefined,
     paperKey: undefined,
@@ -88,10 +90,13 @@ function createRuntimeHarness() {
 }
 
 function buildTextEvent(params: {
+  atMentionUsernames?: string[];
   body: string;
   conversationId?: string;
   id?: number;
   senderUsername?: string;
+  teamName?: string;
+  topicName?: string;
 }): KeybaseListenEvent {
   return {
     type: "chat",
@@ -100,9 +105,10 @@ function buildTextEvent(params: {
       id: params.id ?? 44,
       raw: {},
       conversationId: params.conversationId ?? "conv-1",
-      atMentionUsernames: [],
+      atMentionUsernames: params.atMentionUsernames ?? [],
       channel: {
-        name: "openclaw,sender",
+        name: params.teamName ?? "openclaw,sender",
+        ...(params.topicName ? { membersType: "team", topicName: params.topicName } : {}),
       },
       sender: {
         username: params.senderUsername ?? "sender",
@@ -208,6 +214,164 @@ describe("keybaseGatewayAdapter.startAccount", () => {
           replyToId: "88",
         }),
       );
+    });
+
+    abort.abort();
+    await task;
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("blocks team messages that are not allowlisted", async () => {
+    const stop = vi.fn();
+    mocks.startKeybaseApiListen.mockReturnValue({
+      child: {} as never,
+      stop,
+    });
+    const harness = createRuntimeHarness();
+    const abort = new AbortController();
+    const ctx = createStartAccountContext({
+      account: buildAccount({
+        groupPolicy: "allowlist",
+        groups: {},
+      }),
+      abortSignal: abort.signal,
+    });
+    Object.assign(ctx, { channelRuntime: harness.channelRuntime });
+
+    const task = keybaseGatewayAdapter.startAccount!(ctx);
+
+    await vi.waitFor(() => expect(mocks.startKeybaseApiListen).toHaveBeenCalledOnce());
+    const args = mocks.startKeybaseApiListen.mock.calls[0]?.[0] as {
+      onEvent: (event: KeybaseListenEvent) => void;
+    };
+    args.onEvent(
+      buildTextEvent({
+        body: "@openclaw hello",
+        teamName: "lightninglabs",
+        topicName: "lbottest",
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(harness.recordInboundSession).not.toHaveBeenCalled();
+      expect(harness.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    });
+
+    abort.abort();
+    await task;
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("skips allowlisted team messages that do not mention the bot", async () => {
+    const stop = vi.fn();
+    mocks.startKeybaseApiListen.mockReturnValue({
+      child: {} as never,
+      stop,
+    });
+    const harness = createRuntimeHarness();
+    const abort = new AbortController();
+    const ctx = createStartAccountContext({
+      account: buildAccount({
+        groupPolicy: "allowlist",
+        groups: {
+          "team:lightninglabs#lbottest": {
+            allowFrom: [],
+          },
+        },
+      }),
+      abortSignal: abort.signal,
+    });
+    Object.assign(ctx, { channelRuntime: harness.channelRuntime });
+
+    const task = keybaseGatewayAdapter.startAccount!(ctx);
+
+    await vi.waitFor(() => expect(mocks.startKeybaseApiListen).toHaveBeenCalledOnce());
+    const args = mocks.startKeybaseApiListen.mock.calls[0]?.[0] as {
+      onEvent: (event: KeybaseListenEvent) => void;
+    };
+    args.onEvent(
+      buildTextEvent({
+        body: "hello from the team chat",
+        teamName: "lightninglabs",
+        topicName: "lbottest",
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(harness.recordInboundSession).not.toHaveBeenCalled();
+      expect(harness.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    });
+
+    abort.abort();
+    await task;
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("routes mentioned allowlisted team messages through the standard reply pipeline", async () => {
+    const stop = vi.fn();
+    mocks.startKeybaseApiListen.mockReturnValue({
+      child: {} as never,
+      stop,
+    });
+    const harness = createRuntimeHarness();
+    const abort = new AbortController();
+    const ctx = createStartAccountContext({
+      account: buildAccount({
+        groupPolicy: "allowlist",
+        groups: {
+          "team:lightninglabs#lbottest": {
+            allowFrom: [],
+            requireMention: true,
+            systemPrompt: "Stay focused on infra tasks.",
+            skills: ["infra"],
+          },
+        },
+      }),
+      abortSignal: abort.signal,
+      cfg: {
+        session: { store: { type: "jsonl" } },
+        commands: { useAccessGroups: true },
+      } as never,
+    });
+    Object.assign(ctx, { channelRuntime: harness.channelRuntime });
+
+    const task = keybaseGatewayAdapter.startAccount!(ctx);
+
+    await vi.waitFor(() => expect(mocks.startKeybaseApiListen).toHaveBeenCalledOnce());
+    const args = mocks.startKeybaseApiListen.mock.calls[0]?.[0] as {
+      onEvent: (event: KeybaseListenEvent) => void;
+    };
+    args.onEvent(
+      buildTextEvent({
+        body: "@openclaw hello from keybase",
+        conversationId: "conv-team-1",
+        id: 99,
+        teamName: "lightninglabs",
+        topicName: "lbottest",
+        atMentionUsernames: ["openclaw"],
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(harness.recordInboundSession).toHaveBeenCalledTimes(1);
+      expect(harness.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+      expect(mocks.sendKeybaseText).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: "conv:conv-team-1",
+          text: "reply from agent",
+          replyToId: "99",
+        }),
+      );
+    });
+
+    const dispatchCall = harness.dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0] as
+      | { ctx?: Record<string, unknown>; replyOptions?: Record<string, unknown> }
+      | undefined;
+    expect(dispatchCall?.ctx?.ChatType).toBe("group");
+    expect(dispatchCall?.ctx?.WasMentioned).toBe(true);
+    expect(dispatchCall?.ctx?.GroupSystemPrompt).toBe("Stay focused on infra tasks.");
+    expect(dispatchCall?.replyOptions).toMatchObject({
+      skillFilter: ["infra"],
     });
 
     abort.abort();

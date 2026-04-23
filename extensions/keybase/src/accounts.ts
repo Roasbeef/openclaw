@@ -2,8 +2,13 @@ import { createAccountListHelpers } from "openclaw/plugin-sdk/account-helpers";
 import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
 import { resolveMergedAccountConfig } from "openclaw/plugin-sdk/account-resolution";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
-import { normalizeKeybaseAllowEntry } from "./targets.js";
-import type { CoreConfig, KeybaseResolvedAccountConfig, ResolvedKeybaseAccount } from "./types.js";
+import { normalizeKeybaseAllowEntry, normalizeKeybaseGroupKey } from "./targets.js";
+import type {
+  CoreConfig,
+  KeybaseResolvedAccountConfig,
+  ResolvedKeybaseAccount,
+  ResolvedKeybaseGroupConfig,
+} from "./types.js";
 
 export const DEFAULT_ACCOUNT_ID = "default";
 
@@ -22,6 +27,37 @@ function normalizeKeybaseAllowFrom(allowFrom: Array<string | number> | undefined
         .filter((entry): entry is string => Boolean(entry)),
     ),
   ];
+}
+
+function normalizeKeybaseSkills(skills: string[] | undefined): string[] | undefined {
+  const normalized = [...new Set((skills ?? []).map((entry) => entry.trim()).filter(Boolean))];
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeKeybaseGroups(
+  groups: KeybaseResolvedAccountConfig["groups"],
+): Record<string, ResolvedKeybaseGroupConfig> {
+  const normalized: Record<string, ResolvedKeybaseGroupConfig> = {};
+  for (const [rawKey, rawGroup] of Object.entries(groups ?? {})) {
+    const key = rawKey === "*" ? "*" : normalizeKeybaseGroupKey(rawKey);
+    if (!key) {
+      continue;
+    }
+    normalized[key] = {
+      allowFrom: normalizeKeybaseAllowFrom(rawGroup?.allowFrom),
+      ...(rawGroup?.enabled !== undefined ? { enabled: rawGroup.enabled } : {}),
+      ...(rawGroup?.requireMention !== undefined
+        ? { requireMention: rawGroup.requireMention }
+        : {}),
+      ...(normalizeOptionalString(rawGroup?.systemPrompt)
+        ? { systemPrompt: normalizeOptionalString(rawGroup?.systemPrompt) }
+        : {}),
+      ...(normalizeKeybaseSkills(rawGroup?.skills)
+        ? { skills: normalizeKeybaseSkills(rawGroup?.skills) }
+        : {}),
+    };
+  }
+  return normalized;
 }
 
 function resolveMergedKeybaseAccountConfig(
@@ -65,6 +101,8 @@ export function resolveKeybaseAccount(params: {
     enableTyping: merged.enableTyping === true,
     config: merged,
     dmPolicy: merged.dmPolicy ?? "pairing",
+    groupPolicy: merged.groupPolicy ?? "allowlist",
+    groups: normalizeKeybaseGroups(merged.groups),
     ...(normalizeOptionalString(merged.defaultTo)
       ? { defaultTo: normalizeOptionalString(merged.defaultTo) }
       : {}),
