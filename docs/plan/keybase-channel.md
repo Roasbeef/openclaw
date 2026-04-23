@@ -11,9 +11,18 @@ read_when:
 
 ## Status
 
-- Planned.
-- Phase 0 transport spike is in progress in `extensions/keybase`.
-- Public channel docs and product wiring should wait for phase 1.
+- Phase 0 transport spike is complete in `extensions/keybase`.
+- Phase 1 is in progress.
+- Current phase 1 baseline is implemented locally:
+  - bundled plugin scaffold
+  - DM ingress
+  - team/channel ingress
+  - mention gating
+  - route allowlists
+  - per-group `systemPrompt`
+  - per-group `skills`
+  - directory and security warning wiring
+- Public docs and product exposure should still wait until the remaining phase 1 gaps are closed.
 
 ## Goals
 
@@ -102,6 +111,22 @@ Initial supported behavior:
 - attach
 - status and doctor
 
+Current state:
+
+- Done:
+  - bundled plugin package surface
+  - Keybase account resolution and config schema
+  - DM gateway flow with pairing and allowlist handling
+  - team-channel inbound routing with mention gating and route allowlists
+  - per-group `requireMention`, `systemPrompt`, and `skills`
+  - initial directory + security warning surfaces
+- Remaining:
+  - docs at `docs/channels/keybase.md`
+  - setup UX polish
+  - richer doctor coverage
+  - outbound edits/reactions/attachments/pins wired through the full channel contract
+  - live QA or transport-smoke lane
+
 ## Phase 2
 
 Match fully featured OpenClaw channel flows where Keybase has a clean mapping.
@@ -141,6 +166,21 @@ Scope:
 - persistent state for OpenClaw and Keybase home
 - optional shared repo volume for coding agents
 
+Implementation notes:
+
+- OpenClaw already ships a multi-stage Docker build in `Dockerfile`.
+- The base image can already install extra apt packages through `OPENCLAW_DOCKER_APT_PACKAGES`.
+- Bundled plugin dependency pre-install is already supported through `OPENCLAW_EXTENSIONS`.
+- For a Keybase-capable image we should prefer a small additive layer over a separate bespoke Docker build unless Keybase packaging forces a different base image.
+- The lbot startup pattern maps cleanly:
+  - source secrets
+  - run `keybase oneshot`
+  - start the long-running bot process
+- Persist at least:
+  - `~/.openclaw`
+  - Keybase home/service state
+- If the deployment also needs repo-local coding tasks, mount a separate shared workspace volume instead of putting repo state inside the Keybase home volume.
+
 ## Phase 5
 
 Roll the image into EKS and Helm.
@@ -153,6 +193,17 @@ Scope:
 - enforce single replica per Keybase identity
 - separate shared-bot and per-user release values
 
+Implementation notes:
+
+- The Lightning Labs `lbot` chart is the right reference shape:
+  - `Recreate` deployment strategy
+  - `replicas: 1`
+  - persistent `/data`
+  - optional shared repo volume for coding mode
+  - custom entrypoint/command flags per deployment flavor
+- Vault-injected secret files and entrypoint sourcing already exist in the `lbot` pattern and should be reused for Keybase paper key plus OpenClaw provider credentials.
+- Do not run a single Keybase identity behind multiple replicas or a rolling multi-pod deployment.
+
 ## Phase 6
 
 Add profile and policy layers for production use.
@@ -163,6 +214,39 @@ Scope:
 - model and tool policy defaults per profile
 - routing between shared global bot and per-user instances
 - operational docs for rollouts, upgrades, and disaster recovery
+
+## Validation Ladder
+
+Use a staged validation path instead of jumping straight to a live Keybase bot:
+
+1. Unit and contract tests in `extensions/keybase`.
+2. Repo-native QA planning:
+   - `docs/concepts/qa-e2e-automation.md`
+   - `docs/help/testing.md`
+   - `qa/README.md`
+3. Docker-backed local OpenClaw image smoke.
+4. Live Keybase smoke against a restricted bot and a dedicated test team/channel.
+5. Helm and EKS rollout.
+
+## Local Smoke Plan
+
+Before touching EKS:
+
+1. Build a local OpenClaw image with Keybase installed and the Keybase plugin enabled.
+2. Add a small entrypoint wrapper that:
+   - sources secrets
+   - runs `keybase oneshot`
+   - starts `openclaw gateway run`
+3. Run a single local container with mounted OpenClaw config/state and Keybase home.
+4. Point it at a dedicated restricted bot identity and test team/channel such as `lbottest`.
+5. Exercise the minimum live contract:
+   - DM canary
+   - team mention canary
+   - unmentioned team message ignored
+   - unallowlisted team route ignored
+   - follow-up reply lands in the same conversation
+
+If we want operator-friendly live transport coverage after that, the right repo-native direction is a real transport QA lane modeled after `openclaw qa matrix` and `openclaw qa telegram`, not a permanent one-off shell script.
 
 ## Open Questions
 
