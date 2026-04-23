@@ -80,6 +80,11 @@
       - any-glob-to-any-file:
           - "extensions/signal/**"
           - "docs/channels/signal.md"
+"channel: keybase":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/keybase/**"
+          - "docs/plan/keybase-channel.md"
 "channel: slack":
   - changed-files:
       - any-glob-to-any-file:
