@@ -2,6 +2,7 @@ import { createAccountListHelpers } from "openclaw/plugin-sdk/account-helpers";
 import { normalizeAccountId } from "openclaw/plugin-sdk/account-id";
 import { resolveMergedAccountConfig } from "openclaw/plugin-sdk/account-resolution";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
+import { normalizeKeybaseAllowEntry } from "./targets.js";
 import type { CoreConfig, KeybaseResolvedAccountConfig, ResolvedKeybaseAccount } from "./types.js";
 
 export const DEFAULT_ACCOUNT_ID = "default";
@@ -12,6 +13,16 @@ const {
 } = createAccountListHelpers("keybase", { normalizeAccountId });
 
 export { listKeybaseAccountIds, resolveDefaultKeybaseAccountId };
+
+function normalizeKeybaseAllowFrom(allowFrom: Array<string | number> | undefined): string[] {
+  return [
+    ...new Set(
+      (allowFrom ?? [])
+        .map((entry) => normalizeKeybaseAllowEntry(String(entry)))
+        .filter((entry): entry is string => Boolean(entry)),
+    ),
+  ];
+}
 
 function resolveMergedKeybaseAccountConfig(
   cfg: CoreConfig,
@@ -48,10 +59,12 @@ export function resolveKeybaseAccount(params: {
   return {
     accountId,
     enabled,
+    allowFrom: normalizeKeybaseAllowFrom(merged.allowFrom),
     configured: hasConfiguration(merged),
     binary: merged.binary?.trim() || "keybase",
     enableTyping: merged.enableTyping === true,
     config: merged,
+    dmPolicy: merged.dmPolicy ?? "pairing",
     ...(normalizeOptionalString(merged.defaultTo)
       ? { defaultTo: normalizeOptionalString(merged.defaultTo) }
       : {}),

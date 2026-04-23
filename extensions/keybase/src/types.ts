@@ -16,10 +16,12 @@ export type CoreConfig = {
 
 export interface ResolvedKeybaseAccount {
   accountId: string;
+  allowFrom: string[];
   binary: string;
   configured: boolean;
   config: KeybaseResolvedAccountConfig;
   defaultTo?: string;
+  dmPolicy: "open" | "allowlist" | "pairing" | "disabled";
   enableTyping: boolean;
   enabled: boolean;
   homeDir?: string;

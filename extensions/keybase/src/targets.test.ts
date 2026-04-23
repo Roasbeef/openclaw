@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildKeybaseDmTarget,
+  inferKeybaseInboundChatType,
   inferKeybaseTargetChatType,
+  normalizeKeybaseAllowEntry,
+  normalizeKeybaseUsername,
   normalizeKeybaseTarget,
   parseKeybaseTarget,
   resolveKeybaseConversationRef,
@@ -23,6 +27,13 @@ describe("Keybase target parsing", () => {
     expect(inferKeybaseTargetChatType("lightninglabs#ops")).toBe("group");
   });
 
+  it("normalizes allowlist entries and DM targets", () => {
+    expect(normalizeKeybaseUsername("Keybase:Alice")).toBe("alice");
+    expect(normalizeKeybaseAllowEntry("dm:Alice")).toBe("alice");
+    expect(normalizeKeybaseAllowEntry("*")).toBe("*");
+    expect(buildKeybaseDmTarget("Alice")).toBe("dm:alice");
+  });
+
   it("resolves conversation references from normalized targets", () => {
     expect(resolveKeybaseConversationRef("conv:abcd1234")).toEqual({
       conversationId: "abcd1234",
@@ -39,5 +50,14 @@ describe("Keybase target parsing", () => {
         name: "alice,bob",
       },
     });
+  });
+
+  it("classifies inbound team traffic as group chat", () => {
+    expect(inferKeybaseInboundChatType({ channel: {} })).toBe("direct");
+    expect(
+      inferKeybaseInboundChatType({
+        channel: { membersType: "team", topicName: "ops" },
+      }),
+    ).toBe("group");
   });
 });

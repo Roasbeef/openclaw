@@ -15,6 +15,8 @@ export interface KeybaseCommandOutput {
   stdout: string;
 }
 
+export type { KeybaseListenEvent } from "./listen.js";
+
 export interface KeybaseCommandRunOptions {
   env?: NodeJS.ProcessEnv;
   maxBuffer?: number;

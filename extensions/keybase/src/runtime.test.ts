@@ -4,10 +4,12 @@ import type { ResolvedKeybaseAccount } from "./types.js";
 
 const account: ResolvedKeybaseAccount = {
   accountId: "default",
+  allowFrom: [],
   binary: "keybase",
   configured: true,
   config: {},
   defaultTo: "dm:alice",
+  dmPolicy: "pairing",
   enableTyping: true,
   enabled: true,
   homeDir: "/tmp/keybase-home",

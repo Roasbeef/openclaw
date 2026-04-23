@@ -21,6 +21,28 @@ function normalizeDelimitedUsernames(value: string): string[] {
   ].toSorted((left, right) => left.localeCompare(right));
 }
 
+export function normalizeKeybaseUsername(value: string): string | undefined {
+  const trimmed = value
+    .trim()
+    .replace(/^keybase:/i, "")
+    .replace(/^dm:/i, "")
+    .trim()
+    .toLowerCase();
+  return trimmed || undefined;
+}
+
+export function normalizeKeybaseAllowEntry(value: string): string | undefined {
+  if (value.trim() === "*") {
+    return "*";
+  }
+  return normalizeKeybaseUsername(value);
+}
+
+export function buildKeybaseDmTarget(username: string): string | null {
+  const normalized = normalizeKeybaseUsername(username);
+  return normalized ? `dm:${normalized}` : null;
+}
+
 export function parseKeybaseTarget(raw: string): ParsedKeybaseTarget | null {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -120,4 +142,16 @@ export function resolveKeybaseConversationRef(
     };
   }
   return null;
+}
+
+export function inferKeybaseInboundChatType(params: {
+  channel: {
+    membersType?: string;
+    topicName?: string;
+  };
+}): "direct" | "group" {
+  if (params.channel.membersType?.toLowerCase() === "team" || params.channel.topicName) {
+    return "group";
+  }
+  return "direct";
 }

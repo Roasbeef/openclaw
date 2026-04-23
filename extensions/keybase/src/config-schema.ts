@@ -1,11 +1,17 @@
-import { buildChannelConfigSchema } from "openclaw/plugin-sdk/channel-config-schema";
+import {
+  AllowFromListSchema,
+  buildChannelConfigSchema,
+  DmPolicySchema,
+} from "openclaw/plugin-sdk/channel-config-primitives";
 import { z } from "openclaw/plugin-sdk/zod";
 
 export const KeybaseAccountConfigSchema = z
   .object({
     name: z.string().optional(),
     enabled: z.boolean().optional(),
+    allowFrom: AllowFromListSchema,
     binary: z.string().optional(),
+    dmPolicy: DmPolicySchema.optional(),
     homeDir: z.string().optional(),
     username: z.string().optional(),
     paperKey: z.string().optional(),
