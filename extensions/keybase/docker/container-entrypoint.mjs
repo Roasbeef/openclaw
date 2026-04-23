@@ -165,22 +165,13 @@ async function prepareKeybaseContainer(resolved) {
     return;
   }
 
-  await runCommand(
-    resolved.binary,
-    [
-      ...buildKeybaseBaseArgs(resolved),
-      "oneshot",
-      "--username",
-      resolved.username,
-      "--paperkey",
-      paperKey,
-    ],
-    {
-      ...process.env,
-      KEYBASE_SERVICE: normalizeOptionalString(process.env.KEYBASE_SERVICE) ?? "1",
-      TMPDIR: normalizeOptionalString(process.env.TMPDIR) ?? resolved.tmpDir,
-    },
-  );
+  await runCommand(resolved.binary, [...buildKeybaseBaseArgs(resolved), "oneshot"], {
+    ...process.env,
+    KEYBASE_PAPERKEY: paperKey,
+    KEYBASE_SERVICE: normalizeOptionalString(process.env.KEYBASE_SERVICE) ?? "1",
+    KEYBASE_USERNAME: resolved.username,
+    TMPDIR: normalizeOptionalString(process.env.TMPDIR) ?? resolved.tmpDir,
+  });
 }
 
 async function main(argv = process.argv.slice(2)) {

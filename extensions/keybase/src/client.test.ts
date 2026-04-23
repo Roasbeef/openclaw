@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildKeybaseApiListenArgs,
+  buildKeybaseOneshotArgs,
   buildKeybaseNotificationSettingsArgs,
+  keybaseOneshot,
   keybaseApiRequest,
 } from "./client.js";
 import { buildKeybaseSendRequest, buildKeybaseTeamChannel } from "./protocol.js";
@@ -81,5 +83,49 @@ describe("Keybase CLI transport", () => {
       "notification-settings",
       "-disable-typing=false",
     ]);
+  });
+
+  it("builds oneshot args without putting credentials on the command line", () => {
+    expect(buildKeybaseOneshotArgs({ homeDir: "/tmp/keybase-home" })).toEqual([
+      "--home",
+      "/tmp/keybase-home",
+      "oneshot",
+    ]);
+  });
+
+  it("runs oneshot with username and paper key in the environment", async () => {
+    const runCommand = vi.fn().mockResolvedValue({
+      stdout: "",
+      stderr: "",
+    });
+
+    await keybaseOneshot(
+      {
+        paperKey: "paper key words",
+        username: "lbottestbot",
+      },
+      {
+        binary: "/usr/local/bin/keybase",
+        env: {
+          KEYBASE_SERVICE: "1",
+        },
+        homeDir: "/tmp/keybase-home",
+        runCommand,
+      },
+    );
+
+    expect(runCommand).toHaveBeenCalledWith(
+      "/usr/local/bin/keybase",
+      ["--home", "/tmp/keybase-home", "oneshot"],
+      {
+        env: {
+          KEYBASE_PAPERKEY: "paper key words",
+          KEYBASE_SERVICE: "1",
+          KEYBASE_USERNAME: "lbottestbot",
+        },
+        maxBuffer: undefined,
+        timeoutMs: undefined,
+      },
+    );
   });
 });

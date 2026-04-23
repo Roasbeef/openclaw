@@ -206,20 +206,9 @@ export function buildKeybaseNotificationSettingsArgs(
 }
 
 export function buildKeybaseOneshotArgs(
-  params: {
-    paperKey: string;
-    username: string;
-  },
   options: Pick<KeybaseCliTransportOptions, "homeDir"> = {},
 ): string[] {
-  return [
-    ...buildKeybaseBaseArgs(options),
-    "oneshot",
-    "--username",
-    params.username,
-    "--paperkey",
-    params.paperKey,
-  ];
+  return [...buildKeybaseBaseArgs(options), "oneshot"];
 }
 
 export async function keybaseApiRequest<TResult>(
@@ -261,8 +250,12 @@ export async function keybaseOneshot(
   options: KeybaseCliTransportOptions = {},
 ): Promise<void> {
   const runCommand = options.runCommand ?? defaultRunCommand;
-  await runCommand(resolveBinary(options), buildKeybaseOneshotArgs(params, options), {
-    env: options.env,
+  await runCommand(resolveBinary(options), buildKeybaseOneshotArgs(options), {
+    env: {
+      ...options.env,
+      KEYBASE_PAPERKEY: params.paperKey,
+      KEYBASE_USERNAME: params.username,
+    },
     maxBuffer: options.maxBuffer,
     timeoutMs: options.timeoutMs,
   });
