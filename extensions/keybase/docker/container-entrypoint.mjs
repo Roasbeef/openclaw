@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const DEFAULT_KEYBASE_BINARY = "keybase";
-const DEFAULT_KEYBASE_HOME = "/home/node/.keybase";
+const DEFAULT_KEYBASE_HOME = "/home/node";
 const DEFAULT_CONFIG_PATH = "/home/node/.openclaw/openclaw.json";
 
 function normalizeOptionalString(value) {

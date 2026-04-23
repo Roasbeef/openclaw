@@ -31,9 +31,9 @@ describe("writeKeybaseDockerSmokeFiles", () => {
         path.join(outputDir, ".env.example"),
         path.join(outputDir, "README.md"),
         path.join(outputDir, "docker-compose.keybase.yml"),
-        path.join(outputDir, "state", "openclaw", "openclaw.json"),
-        path.join(outputDir, "state", "openclaw", "secrets", "README.txt"),
-        path.join(outputDir, "state", "openclaw", "tmp"),
+        path.join(outputDir, "state", "home", ".openclaw", "openclaw.json"),
+        path.join(outputDir, "state", "home", ".openclaw", "secrets", "README.txt"),
+        path.join(outputDir, "state", "home", ".openclaw", "tmp"),
       ]),
     );
 
@@ -43,31 +43,35 @@ describe("writeKeybaseDockerSmokeFiles", () => {
     expect(compose).toContain("platform: linux/amd64");
     expect(compose).toContain('      - "18889:18789"');
     expect(compose).toContain("/app/extensions/keybase/docker/container-entrypoint.mjs");
+    expect(compose).toContain("CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}");
     expect(compose).toContain("KEYBASE_USERNAME: ${KEYBASE_USERNAME:-}");
     expect(compose).toContain("KEYBASE_PAPERKEY_FILE: ${KEYBASE_PAPERKEY_FILE:-}");
-    expect(compose).toContain("OPENCLAW_KEYBASE_HOME: /home/node/.keybase");
+    expect(compose).toContain("OPENCLAW_KEYBASE_HOME: /home/node");
     expect(compose).toContain("OPENCLAW_TMPDIR: /home/node/.openclaw/tmp");
     expect(compose).toContain("TMPDIR: /home/node/.openclaw/tmp");
-    expect(compose).toContain("./state/openclaw:/home/node/.openclaw");
-    expect(compose).toContain("./state/keybase:/home/node/.keybase");
+    expect(compose).toContain("./state/home:/home/node");
     expect(compose).toContain("openclaw-keybase-cli:");
     expect(compose).toContain('network_mode: "service:openclaw-keybase-gateway"');
 
     const envExample = await readFile(path.join(outputDir, ".env.example"), "utf8");
     expect(envExample).toContain("KEYBASE_USERNAME=claw_ll");
     expect(envExample).toContain("KEYBASE_PAPERKEY=");
+    expect(envExample).toContain("CLAUDE_CODE_OAUTH_TOKEN=");
     expect(envExample).toContain(
       "KEYBASE_PAPERKEY_FILE=/home/node/.openclaw/secrets/keybase-paperkey",
     );
 
     const config = await readFile(
-      path.join(outputDir, "state", "openclaw", "openclaw.json"),
+      path.join(outputDir, "state", "home", ".openclaw", "openclaw.json"),
       "utf8",
     );
+    expect(config).toContain('"claude-cli"');
+    expect(config).toContain('"claude-cli/claude-sonnet-4-6"');
+    expect(config).toContain('"CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}"');
     expect(config).toContain('"keybase"');
     expect(config).toContain('"allowInsecureAuth": true');
     expect(config).toContain('"controlUi"');
-    expect(config).toContain('"/home/node/.keybase"');
+    expect(config).toContain('"/home/node"');
 
     const readme = await readFile(path.join(outputDir, "README.md"), "utf8");
     expect(readme).toContain("pnpm keybase:smoke:build");

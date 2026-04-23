@@ -30,7 +30,7 @@ export interface KeybaseDockerSmokeImageResult {
 const DEFAULT_GATEWAY_PORT = 18789;
 const DEFAULT_IMAGE_NAME = "openclaw:keybase-local";
 const DEFAULT_BASE_IMAGE_NAME = "openclaw:keybase-base-local";
-const DEFAULT_KEYBASE_HOME = "/home/node/.keybase";
+const DEFAULT_KEYBASE_HOME = "/home/node";
 const DEFAULT_OPENCLAW_HOME = "/home/node/.openclaw";
 const DEFAULT_OPENCLAW_TMPDIR = `${DEFAULT_OPENCLAW_HOME}/tmp`;
 const DEFAULT_PLATFORM = "linux/amd64";
@@ -46,6 +46,7 @@ function renderCompose(params: { gatewayPort: number; imageName: string; platfor
     environment:
       HOME: /home/node
       TERM: xterm-256color
+      CLAUDE_CODE_OAUTH_TOKEN: \${CLAUDE_CODE_OAUTH_TOKEN:-}
       KEYBASE_PAPERKEY: \${KEYBASE_PAPERKEY:-}
       KEYBASE_PAPERKEY_FILE: \${KEYBASE_PAPERKEY_FILE:-}
       KEYBASE_SERVICE: "1"
@@ -59,8 +60,7 @@ function renderCompose(params: { gatewayPort: number; imageName: string; platfor
       TMPDIR: ${DEFAULT_OPENCLAW_TMPDIR}
       TZ: \${OPENCLAW_TZ:-UTC}
     volumes:
-      - ./state/openclaw:${DEFAULT_OPENCLAW_HOME}
-      - ./state/keybase:${DEFAULT_KEYBASE_HOME}
+      - ./state/home:/home/node
     init: true
     restart: unless-stopped
     entrypoint:
@@ -96,6 +96,7 @@ function renderCompose(params: { gatewayPort: number; imageName: string; platfor
       HOME: /home/node
       TERM: xterm-256color
       BROWSER: echo
+      CLAUDE_CODE_OAUTH_TOKEN: \${CLAUDE_CODE_OAUTH_TOKEN:-}
       KEYBASE_PAPERKEY: \${KEYBASE_PAPERKEY:-}
       KEYBASE_PAPERKEY_FILE: \${KEYBASE_PAPERKEY_FILE:-}
       KEYBASE_SERVICE: "1"
@@ -108,8 +109,7 @@ function renderCompose(params: { gatewayPort: number; imageName: string; platfor
       TMPDIR: ${DEFAULT_OPENCLAW_TMPDIR}
       TZ: \${OPENCLAW_TZ:-UTC}
     volumes:
-      - ./state/openclaw:${DEFAULT_OPENCLAW_HOME}
-      - ./state/keybase:${DEFAULT_KEYBASE_HOME}
+      - ./state/home:/home/node
     stdin_open: true
     tty: true
     init: true
@@ -128,8 +128,9 @@ function renderEnvExample(params: { gatewayPort: number; imageName: string; plat
 KEYBASE_USERNAME=claw_ll
 # Option A: export KEYBASE_PAPERKEY directly from a local paper key file.
 KEYBASE_PAPERKEY=
-# Option B: leave KEYBASE_PAPERKEY empty and point at a file inside ./state/openclaw.
+# Option B: leave KEYBASE_PAPERKEY empty and point at a file inside ./state/home/.openclaw.
 KEYBASE_PAPERKEY_FILE=${DEFAULT_OPENCLAW_HOME}/secrets/keybase-paperkey
+CLAUDE_CODE_OAUTH_TOKEN=
 OPENCLAW_KEYBASE_AUTO_ONESHOT=1
 OPENCLAW_TZ=UTC
 
@@ -156,19 +157,23 @@ Generated scaffold for a local Keybase-backed OpenClaw smoke run.
    - \`cp ${params.envExampleFileName} .env\`
 3. Provide the paper key in one of two ways:
    - export \`KEYBASE_PAPERKEY="$(< /path/to/paper_key.txt)"\`
-   - or place it at \`state/openclaw/secrets/keybase-paperkey\` and keep \`KEYBASE_PAPERKEY_FILE=/home/node/.openclaw/secrets/keybase-paperkey\`
-4. Start the stack:
+   - or place it at \`state/home/.openclaw/secrets/keybase-paperkey\` and keep \`KEYBASE_PAPERKEY_FILE=/home/node/.openclaw/secrets/keybase-paperkey\`
+4. Export the Claude Code subscription token from \`claude setup-token\`:
+   - \`export CLAUDE_CODE_OAUTH_TOKEN=...\`
+5. Start the stack:
    - \`docker compose --env-file .env -f ${params.composeFileName} up -d\`
-5. Open the Control UI:
+6. Open the Control UI:
    - \`http://127.0.0.1:${params.gatewayPort}/\`
-6. Use the CLI sidecar for follow-up config or inspection:
-   - \`docker compose --env-file .env -f ${params.composeFileName} run --rm openclaw-keybase-cli channels status\`
-   - \`docker compose --env-file .env -f ${params.composeFileName} run --rm --entrypoint keybase openclaw-keybase-cli whoami\`
+7. Use the CLI sidecar for follow-up config or inspection:
+   - \`docker compose --env-file .env -f ${params.composeFileName} up -d openclaw-keybase-cli\`
+   - \`docker compose --env-file .env -f ${params.composeFileName} exec openclaw-keybase-cli channels status\`
+   - \`docker compose --env-file .env -f ${params.composeFileName} exec openclaw-keybase-gateway keybase whoami\`
 
 ## Notes
 
 - The smoke image defaults to \`${params.platform}\` because the official Keybase Linux package is amd64-focused.
-- The generated \`state/openclaw/openclaw.json\` only bootstraps the Keybase channel baseline. Add the test team allowlist before group-chat canaries.
+- The generated \`state/home/.openclaw/openclaw.json\` sets the default model to \`claude-cli/claude-sonnet-4-6\` and preserves \`CLAUDE_CODE_OAUTH_TOKEN\` for the Claude child process.
+- The shared \`state/home\` mount matches the working \`lbot\` home layout more closely than a split Keybase subdirectory.
 - Start with one bot container and a real external sender. Add a second sender identity/container after the bot-side path is stable.
 `;
 }
@@ -176,6 +181,26 @@ Generated scaffold for a local Keybase-backed OpenClaw smoke run.
 function renderOpenClawConfig() {
   return `${JSON.stringify(
     {
+      agents: {
+        defaults: {
+          cliBackends: {
+            "claude-cli": {
+              command: "claude",
+              env: {
+                CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN}",
+              },
+            },
+          },
+          model: {
+            primary: "claude-cli/claude-sonnet-4-6",
+          },
+          models: {
+            "claude-cli/claude-sonnet-4-6": {
+              alias: "Sonnet",
+            },
+          },
+        },
+      },
       channels: {
         keybase: {
           binary: "keybase",
@@ -244,10 +269,10 @@ export async function writeKeybaseDockerSmokeFiles(params: {
   const imageName = params.imageName ?? DEFAULT_IMAGE_NAME;
   const platform = params.platform ?? DEFAULT_PLATFORM;
   const stateDir = path.join(outputDir, "state");
-  const openclawStateDir = path.join(stateDir, "openclaw");
+  const homeStateDir = path.join(stateDir, "home");
+  const openclawStateDir = path.join(homeStateDir, ".openclaw");
   const secretsDir = path.join(openclawStateDir, "secrets");
   const openclawTmpDir = path.join(openclawStateDir, "tmp");
-  const keybaseStateDir = path.join(stateDir, "keybase");
   const composeFile = path.join(outputDir, "docker-compose.keybase.yml");
   const envExampleFile = path.join(outputDir, ".env.example");
   const readmeFile = path.join(outputDir, "README.md");
@@ -256,7 +281,7 @@ export async function writeKeybaseDockerSmokeFiles(params: {
 
   await fs.mkdir(secretsDir, { recursive: true });
   await fs.mkdir(openclawTmpDir, { recursive: true });
-  await fs.mkdir(keybaseStateDir, { recursive: true });
+  await fs.mkdir(homeStateDir, { recursive: true });
 
   await fs.writeFile(composeFile, renderCompose({ gatewayPort, imageName, platform }), "utf8");
   await fs.writeFile(

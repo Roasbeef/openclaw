@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { keybaseOneshot } from "./client.js";
 
 const DEFAULT_KEYBASE_BINARY = "keybase";
-const DEFAULT_KEYBASE_HOME = "/home/node/.keybase";
+const DEFAULT_KEYBASE_HOME = "/home/node";
 const DEFAULT_CONFIG_PATH = "/home/node/.openclaw/openclaw.json";
 
 type ReadFileLike = typeof readFile;

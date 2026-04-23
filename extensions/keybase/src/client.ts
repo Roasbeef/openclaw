@@ -136,6 +136,11 @@ function resolveBinary(options?: KeybaseCliTransportOptions): string {
   return readNonEmptyString(options?.binary, "keybase");
 }
 
+function isKeybaseSocketBootstrapError(stderr: string): boolean {
+  const normalized = stderr.toLowerCase();
+  return normalized.includes("keybased.sock") && normalized.includes("no such file or directory");
+}
+
 export function buildKeybaseBaseArgs(
   options: Pick<KeybaseCliTransportOptions, "homeDir"> = {},
 ): string[] {
@@ -263,6 +268,8 @@ export async function keybaseOneshot(
 
 export function startKeybaseApiListen(
   params: {
+    bootstrapRetryDelayMs?: number;
+    bootstrapRetryMaxAttempts?: number;
     listen?: KeybaseApiListenOptions;
     onError?: (error: Error) => void;
     onEvent: (event: KeybaseListenEvent) => void;
@@ -270,47 +277,102 @@ export function startKeybaseApiListen(
   } & KeybaseCliTransportOptions,
 ): KeybaseListenHandle {
   const spawnCommand = params.spawnCommand ?? spawn;
-  const child = spawnCommand(
-    resolveBinary(params),
-    buildKeybaseApiListenArgs(params.listen, params),
-    {
-      env: params.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
+  const maxBootstrapRetries = params.bootstrapRetryMaxAttempts ?? 8;
+  const bootstrapRetryDelayMs = params.bootstrapRetryDelayMs ?? 750;
+  let activeChild: ChildProcessByStdio<null, Readable, Readable> | null = null;
+  let activeReader: ReturnType<typeof createInterface> | null = null;
+  let retryTimer: NodeJS.Timeout | null = null;
+  let retryAttempts = 0;
+  let stopped = false;
 
-  if (!child.stdout || !child.stderr) {
-    throw new Error("Keybase api-listen child process did not expose stdout/stderr");
-  }
-
-  let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string | Buffer) => {
-    stderr += chunk.toString();
-  });
-  child.on("error", (error) => {
-    params.onError?.(error);
-  });
-
-  const reader = createInterface({ input: child.stdout });
-  reader.on("line", (line) => {
-    try {
-      params.onEvent(parseKeybaseListenEvent(line));
-    } catch (error) {
-      params.onError?.(error instanceof Error ? error : new Error(String(error)));
+  const clearRetryTimer = () => {
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
     }
-  });
-  child.on("close", (code, signal) => {
-    params.onExit?.({ code, signal, stderr });
-  });
+  };
+
+  const stopActiveChild = () => {
+    activeReader?.close();
+    activeReader = null;
+    if (activeChild && !activeChild.killed) {
+      activeChild.kill();
+    }
+  };
+
+  const launch = () => {
+    const child = spawnCommand(
+      resolveBinary(params),
+      buildKeybaseApiListenArgs(params.listen, params),
+      {
+        env: params.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    activeChild = child;
+
+    if (!child.stdout || !child.stderr) {
+      throw new Error("Keybase api-listen child process did not expose stdout/stderr");
+    }
+
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string | Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => {
+      if (!stopped) {
+        params.onError?.(error);
+      }
+    });
+
+    const reader = createInterface({ input: child.stdout });
+    activeReader = reader;
+    reader.on("line", (line) => {
+      try {
+        params.onEvent(parseKeybaseListenEvent(line));
+      } catch (error) {
+        params.onError?.(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+
+    child.on("close", (code, signal) => {
+      if (activeReader === reader) {
+        activeReader = null;
+      }
+      if (activeChild === child) {
+        activeChild = null;
+      }
+      if (
+        !stopped &&
+        signal === null &&
+        isKeybaseSocketBootstrapError(stderr) &&
+        retryAttempts < maxBootstrapRetries
+      ) {
+        retryAttempts += 1;
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          launch();
+        }, bootstrapRetryDelayMs);
+        return;
+      }
+      params.onExit?.({ code, signal, stderr });
+    });
+  };
+
+  launch();
 
   return {
-    child,
-    stop() {
-      reader.close();
-      if (!child.killed) {
-        child.kill();
+    get child() {
+      if (!activeChild) {
+        throw new Error("Keybase api-listen child is not running");
       }
+      return activeChild;
+    },
+    stop() {
+      stopped = true;
+      clearRetryTimer();
+      stopActiveChild();
     },
   };
 }

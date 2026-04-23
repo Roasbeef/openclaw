@@ -18,7 +18,8 @@ COPY --chown=node:node extensions/keybase /app/extensions/keybase
 
 ENV KEYBASE_SERVICE=1
 
-RUN chmod 755 /usr/bin/keybase /usr/bin/kbfsfuse && \
-    install -d -o node -g node /home/node/.keybase
+RUN npm install -g @anthropic-ai/claude-code && \
+    chmod 755 /usr/bin/keybase /usr/bin/kbfsfuse && \
+    install -d -o node -g node /home/node
 
 USER node

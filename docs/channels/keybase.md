@@ -144,13 +144,19 @@ docker compose --env-file .env -f docker-compose.keybase.yml up -d
 Notes:
 
 - The smoke image layers Keybase on top of a normal OpenClaw image with the
-  `keybase` plugin bundled.
+  `keybase` plugin bundled and installs the Claude Code CLI for
+  `claude -p` runs.
+- The generated smoke config defaults the agent model to
+  `claude-cli/claude-sonnet-4-6` only. It does not use normal Anthropic
+  provider auth.
 - The gateway container uses `/app/extensions/keybase/docker/container-entrypoint.mjs`
-  to sync the local Keybase baseline into `state/openclaw/openclaw.json`, run
+  to sync the local Keybase baseline into `state/home/.openclaw/openclaw.json`, run
   `keybase oneshot`, and then start the gateway.
+- Set `CLAUDE_CODE_OAUTH_TOKEN` in `.env` from `claude setup-token` so the
+  Claude child process can authenticate inside the container.
 - For local paper key reuse, either export `KEYBASE_PAPERKEY="$(< /path/to/paper_key.txt)"`
   before `docker compose up`, or place the secret under
-  `state/openclaw/secrets/keybase-paperkey` and point
+  `state/home/.openclaw/secrets/keybase-paperkey` and point
   `KEYBASE_PAPERKEY_FILE=/home/node/.openclaw/secrets/keybase-paperkey`.
 - The smoke path currently defaults to `linux/amd64` because the official
   Keybase Linux package is amd64-oriented.

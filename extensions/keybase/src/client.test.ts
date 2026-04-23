@@ -1,3 +1,5 @@
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildKeybaseApiListenArgs,
@@ -5,8 +7,24 @@ import {
   buildKeybaseNotificationSettingsArgs,
   keybaseOneshot,
   keybaseApiRequest,
+  startKeybaseApiListen,
 } from "./client.js";
 import { buildKeybaseSendRequest, buildKeybaseTeamChannel } from "./protocol.js";
+
+class MockListenChild extends EventEmitter {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  killed = false;
+
+  kill() {
+    this.killed = true;
+    return true;
+  }
+}
+
+function createListenChild() {
+  return new MockListenChild() as unknown as ReturnType<typeof startKeybaseApiListen>["child"];
+}
 
 describe("Keybase CLI transport", () => {
   it("runs chat api requests without shell interpolation", async () => {
@@ -127,5 +145,36 @@ describe("Keybase CLI transport", () => {
         timeoutMs: undefined,
       },
     );
+  });
+
+  it("retries api-listen when the keybase service socket is still booting", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstChild = createListenChild();
+      const secondChild = createListenChild();
+      const spawnCommand = vi.fn().mockReturnValueOnce(firstChild).mockReturnValueOnce(secondChild);
+
+      const handle = startKeybaseApiListen({
+        bootstrapRetryDelayMs: 250,
+        bootstrapRetryMaxAttempts: 2,
+        onEvent: vi.fn(),
+        spawnCommand,
+      });
+
+      firstChild.stderr.emit(
+        "data",
+        "dial unix /home/node/.keybase/.config/keybase/keybased.sock: connect: no such file or directory",
+      );
+      firstChild.emit("close", 2, null);
+
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(spawnCommand).toHaveBeenCalledTimes(2);
+      expect(handle.child).toBe(secondChild);
+
+      handle.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
