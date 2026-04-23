@@ -128,3 +128,29 @@ For a containerized Keybase bot, keep the startup model simple:
 5. Start `openclaw gateway run`.
 
 Do not run one Keybase identity behind multiple replicas.
+
+## Local Docker smoke
+
+The repo now includes an isolated local smoke harness for Keybase:
+
+```bash
+pnpm keybase:smoke:build
+pnpm keybase:smoke:scaffold
+cd .artifacts/keybase-docker
+cp .env.example .env
+docker compose --env-file .env -f docker-compose.keybase.yml up -d
+```
+
+Notes:
+
+- The smoke image layers Keybase on top of a normal OpenClaw image with the
+  `keybase` plugin bundled.
+- The gateway container uses `/app/extensions/keybase/docker/container-entrypoint.mjs`
+  to sync the local Keybase baseline into `state/openclaw/openclaw.json`, run
+  `keybase oneshot`, and then start the gateway.
+- For local paper key reuse, either export `KEYBASE_PAPERKEY="$(< /path/to/paper_key.txt)"`
+  before `docker compose up`, or place the secret under
+  `state/openclaw/secrets/keybase-paperkey` and point
+  `KEYBASE_PAPERKEY_FILE=/home/node/.openclaw/secrets/keybase-paperkey`.
+- The smoke path currently defaults to `linux/amd64` because the official
+  Keybase Linux package is amd64-oriented.

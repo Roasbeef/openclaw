@@ -225,6 +225,11 @@ Use a staged validation path instead of jumping straight to a live Keybase bot:
    - `docs/help/testing.md`
    - `qa/README.md`
 3. Docker-backed local OpenClaw image smoke.
+   - Current scaffold:
+     - `extensions/keybase/docker/Dockerfile`
+     - `extensions/keybase/src/container-entrypoint.ts`
+     - `extensions/keybase/src/docker-smoke.ts`
+     - `scripts/keybase-smoke.ts`
 4. Live Keybase smoke against a restricted bot and a dedicated test team/channel.
 5. Helm and EKS rollout.
 
@@ -232,12 +237,11 @@ Use a staged validation path instead of jumping straight to a live Keybase bot:
 
 Before touching EKS:
 
-1. Build a local OpenClaw image with Keybase installed and the Keybase plugin enabled.
-2. Add a small entrypoint wrapper that:
-   - sources secrets
-   - runs `keybase oneshot`
-   - starts `openclaw gateway run`
-3. Run a single local container with mounted OpenClaw config/state and Keybase home.
+1. Build the local smoke image:
+   - `pnpm keybase:smoke:build`
+2. Write the isolated compose scaffold:
+   - `pnpm keybase:smoke:scaffold`
+3. Start a single local bot container with mounted OpenClaw state and Keybase home.
 4. Point it at a dedicated restricted bot identity and test team/channel such as `lbottest`.
 5. Exercise the minimum live contract:
    - DM canary
@@ -245,6 +249,7 @@ Before touching EKS:
    - unmentioned team message ignored
    - unallowlisted team route ignored
    - follow-up reply lands in the same conversation
+6. After the single-bot path is stable, add a second test identity/container for black-box send/receive validation.
 
 If we want operator-friendly live transport coverage after that, the right repo-native direction is a real transport QA lane modeled after `openclaw qa matrix` and `openclaw qa telegram`, not a permanent one-off shell script.
 
