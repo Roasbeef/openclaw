@@ -1329,6 +1329,8 @@
     "ios:version:check": "node --import tsx scripts/ios-sync-versioning.ts --check",
     "ios:version:pin": "node --import tsx scripts/ios-pin-version.ts",
     "ios:version:sync": "node --import tsx scripts/ios-sync-versioning.ts --write",
+    "keybase:smoke:build": "node --import tsx scripts/keybase-smoke.ts build",
+    "keybase:smoke:scaffold": "node --import tsx scripts/keybase-smoke.ts scaffold",
     "lint": "node scripts/run-oxlint-shards.mjs",
     "lint:agent:ingress-owner": "node scripts/check-ingress-agent-owner-context.mjs",
     "lint:all": "node scripts/run-oxlint.mjs",

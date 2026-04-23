@@ -295,7 +295,9 @@ export const keybasePlugin = createChatChannelPlugin({
     collectWarnings: collectKeybaseGroupPolicyWarnings,
   },
   outbound: {
-    deliveryMode: "direct",
+    base: {
+      deliveryMode: "direct",
+    },
     attachedResults: {
       channel: CHANNEL_ID,
       sendText: async ({ cfg, to, text, accountId, replyToId }) =>
