@@ -1,6 +1,15 @@
 {
   "id": "keybase",
   "channels": ["keybase"],
+  "channelEnvVars": {
+    "keybase": [
+      "KEYBASE_BINARY",
+      "KEYBASE_HOME",
+      "KEYBASE_USERNAME",
+      "KEYBASE_PAPERKEY",
+      "KEYBASE_PAPERKEY_FILE"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

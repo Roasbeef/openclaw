@@ -2,9 +2,50 @@
   "name": "@openclaw/keybase",
   "version": "2026.4.23",
   "private": true,
-  "description": "OpenClaw Keybase transport spike",
+  "description": "OpenClaw Keybase channel plugin",
   "type": "module",
   "devDependencies": {
     "@openclaw/plugin-sdk": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "setupEntry": "./setup-entry.ts",
+    "channel": {
+      "id": "keybase",
+      "label": "Keybase",
+      "selectionLabel": "Keybase (CLI JSON API)",
+      "detailLabel": "Keybase",
+      "docsPath": "/channels/keybase",
+      "docsLabel": "keybase",
+      "blurb": "Keybase chat bot via the Keybase CLI JSON API.",
+      "systemImage": "key.horizontal",
+      "markdownCapable": true,
+      "order": 73,
+      "exposure": {
+        "configured": false,
+        "setup": false,
+        "docs": false
+      },
+      "cliAddOptions": [
+        {
+          "flags": "--keybase-home <dir>",
+          "description": "Keybase home directory"
+        },
+        {
+          "flags": "--keybase-binary <path>",
+          "description": "Path to the keybase CLI"
+        },
+        {
+          "flags": "--keybase-username <user>",
+          "description": "Keybase bot username for oneshot auth"
+        },
+        {
+          "flags": "--keybase-paperkey-file <path>",
+          "description": "Path to a Keybase paper key file"
+        }
+      ]
+    }
   }
 }
