@@ -276,10 +276,11 @@ pnpm openclaw qa keybase --output-dir .artifacts/keybase-docker \
 
 The QA lane reuses the same two-container scaffold and writes
 `keybase-blackbox-report.json` plus `keybase-blackbox-summary.md`. It currently
-covers team-channel canary replies, tagged help commands, DM canary replies, DM
-pairing challenges, mention gating, group allowlist block, restart resume, and
-ack reaction observation. The runner installs the requested `team#general` test
-route in the local smoke config before it starts assertions. Use repeated
+covers team-channel canary replies, tagged help commands, native command
+advertisement discovery, chunked command delivery, DM canary replies, DM pairing
+challenges, mention gating, group allowlist block, restart resume, and ack
+reaction observation. The runner installs the requested `team#general` test route
+in the local smoke config before it starts assertions. Use repeated
 `--scenario <id>` flags to run a subset: `canary`, `help-command`,
-`dm-canary`, `dm-pairing`, `mention-gating`, `allowlist-block`, or
-`restart-resume`.
+`command-advertisements`, `chunked-commands`, `dm-canary`, `dm-pairing`,
+`mention-gating`, `allowlist-block`, or `restart-resume`.

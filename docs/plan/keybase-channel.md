@@ -235,7 +235,7 @@ Use a staged validation path instead of jumping straight to a live Keybase bot:
 4. Live Keybase smoke against a restricted bot and a dedicated test team/channel.
    - Repeatable lane: `pnpm openclaw qa keybase --output-dir .artifacts/keybase-docker --team lbottest --bot lbottestbot`
    - The runner installs the requested `team#general` route into the local smoke config before assertions.
-   - Covered contract: team-channel canary reply, tagged help command, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation.
+   - Covered contract: team-channel canary reply, tagged help command, native command advertisement discovery, chunked command delivery, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation.
 5. Helm and EKS rollout.
 
 ## Local Smoke Plan

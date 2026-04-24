@@ -91,11 +91,11 @@ their own scenario list shape:
 `qa-channel` remains the broad synthetic product-behavior suite and is not part
 of the live transport coverage matrix.
 
-| Lane     | Canary | DM reply | DM pairing | Mention gating | Allowlist block | Top-level reply | Restart resume | Thread follow-up | Thread isolation | Reaction observation | Help command |
-| -------- | ------ | -------- | ---------- | -------------- | --------------- | --------------- | -------------- | ---------------- | ---------------- | -------------------- | ------------ |
-| Keybase  | x      | x        | x          | x              | x               | x               | x              |                  |                  | x                    | x            |
-| Matrix   | x      |          |            | x              | x               | x               | x              | x                | x                | x                    |              |
-| Telegram | x      |          |            |                |                 |                 |                |                  |                  |                      | x            |
+| Lane     | Canary | DM reply | DM pairing | Mention gating | Allowlist block | Top-level reply | Restart resume | Thread follow-up | Thread isolation | Reaction observation | Help command | Command ads | Chunked replies |
+| -------- | ------ | -------- | ---------- | -------------- | --------------- | --------------- | -------------- | ---------------- | ---------------- | -------------------- | ------------ | ----------- | --------------- |
+| Keybase  | x      | x        | x          | x              | x               | x               | x              |                  |                  | x                    | x            | x           | x               |
+| Matrix   | x      |          |            | x              | x               | x               | x              | x                | x                | x                    |              |             |                 |
+| Telegram | x      |          |            |                |                 |                 |                |                  |                  |                      | x            |             |                 |
 
 This keeps `qa-channel` as the broad product-behavior suite while Matrix,
 Telegram, and future live transports share one explicit transport-contract

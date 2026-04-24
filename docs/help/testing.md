@@ -130,7 +130,7 @@ runs the same lanes before release approval.
   - Runs the Keybase live QA lane against local Docker containers for a Keybase bot identity and a separate sender identity.
   - Requires the Keybase smoke scaffold under `.artifacts/keybase-docker`, filled `.env`, bot paper key, sender paper key, and a real test team such as `lbottest`.
   - Installs the requested `team#general` route in the local smoke config before running assertions.
-  - Covers team-channel canary reply, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation.
+  - Covers team-channel canary reply, native command advertisement discovery, chunked command delivery, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation.
   - Writes a Keybase QA report and summary under the smoke output directory.
 - `pnpm openclaw qa telegram`
   - Runs the Telegram live QA lane against a real private group using the driver and SUT bot tokens from env.
@@ -147,11 +147,11 @@ Live transport lanes share one standard contract so new transports do not drift:
 `qa-channel` remains the broad synthetic QA suite and is not part of the live
 transport coverage matrix.
 
-| Lane     | Canary | DM reply | DM pairing | Mention gating | Allowlist block | Top-level reply | Restart resume | Thread follow-up | Thread isolation | Reaction observation | Help command |
-| -------- | ------ | -------- | ---------- | -------------- | --------------- | --------------- | -------------- | ---------------- | ---------------- | -------------------- | ------------ |
-| Keybase  | x      | x        | x          | x              | x               | x               | x              |                  |                  | x                    | x            |
-| Matrix   | x      |          |            | x              | x               | x               | x              | x                | x                | x                    |              |
-| Telegram | x      |          |            |                |                 |                 |                |                  |                  |                      | x            |
+| Lane     | Canary | DM reply | DM pairing | Mention gating | Allowlist block | Top-level reply | Restart resume | Thread follow-up | Thread isolation | Reaction observation | Help command | Command ads | Chunked replies |
+| -------- | ------ | -------- | ---------- | -------------- | --------------- | --------------- | -------------- | ---------------- | ---------------- | -------------------- | ------------ | ----------- | --------------- |
+| Keybase  | x      | x        | x          | x              | x               | x               | x              |                  |                  | x                    | x            | x           | x               |
+| Matrix   | x      |          |            | x              | x               | x               | x              | x                | x                | x                    |              |             |                 |
+| Telegram | x      |          |            |                |                 |                 |                |                  |                  |                      | x            |             |                 |
 
 ### Shared Telegram credentials via Convex (v1)
 

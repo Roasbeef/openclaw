@@ -447,6 +447,185 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
     }
   });
 
+  it("runs command advertisement and chunked command scenarios", async () => {
+    const outputDir = await mkdtemp(path.join(os.tmpdir(), "keybase-blackbox-phase2-suite-"));
+    cleanups.push(async () => {
+      await rm(outputDir, { recursive: true, force: true });
+    });
+    await writeKeybaseDockerSmokeFiles({
+      outputDir,
+    });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_776_994_800_000);
+
+    try {
+      const result = await runKeybaseDockerBlackboxSuite(
+        {
+          botUsername: "lbottestbot",
+          outputDir,
+          scenarioIds: ["command-advertisements", "chunked-commands"],
+          team: "lbottest",
+        },
+        {
+          async runCommand(_command, args) {
+            if (args.includes("whoami")) {
+              return {
+                stderr: "",
+                stdout: args.includes("openclaw-keybase-sender")
+                  ? "lbottestuser2\n"
+                  : "lbottestbot\n",
+              };
+            }
+            if (args.includes("channels") && args.includes("status")) {
+              return {
+                stderr: "",
+                stdout: JSON.stringify({
+                  channelAccounts: {
+                    keybase: [
+                      {
+                        running: true,
+                        lastError: null,
+                        lastInboundAt: 1_776_994_801_000,
+                        lastOutboundAt: 1_776_994_802_000,
+                        lastStartAt: 1_776_994_800_000,
+                      },
+                    ],
+                  },
+                }),
+              };
+            }
+            const apiIndex = args.indexOf("-m");
+            if (apiIndex >= 0) {
+              const request = JSON.parse(args[apiIndex + 1]) as {
+                method?: string;
+                params?: {
+                  options?: {
+                    message?: { body?: string };
+                  };
+                };
+              };
+              if (request.method === "list") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      conversations: [
+                        {
+                          id: "conv-team",
+                          is_default_conv: true,
+                          channel: { name: "lbottest", members_type: "team" },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+              if (request.method === "listcommands") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      commands: [
+                        { name: "/help", description: "Show help." },
+                        { name: "status", description: "Show status." },
+                        { name: "/commands", description: "List commands." },
+                      ],
+                    },
+                  }),
+                };
+              }
+              if (request.method === "send") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: { id: 501 },
+                  }),
+                };
+              }
+              if (request.method === "read") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      messages: [
+                        {
+                          msg: {
+                            id: 503,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_801_500,
+                            content: {
+                              type: "reaction",
+                              reaction: {
+                                b: ":eyes:",
+                                m: 501,
+                              },
+                            },
+                          },
+                        },
+                        {
+                          msg: {
+                            id: 502,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_802_000,
+                            content: {
+                              type: "text",
+                              text: {
+                                replyTo: 501,
+                                body: "Available commands include /help and /commands.",
+                              },
+                            },
+                          },
+                        },
+                        {
+                          msg: {
+                            id: 504,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_802_001,
+                            content: {
+                              type: "text",
+                              text: {
+                                replyTo: 501,
+                                body: "Status commands include /status.",
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+            }
+            return { stderr: "", stdout: "" };
+          },
+        },
+      );
+
+      expect(result.passed).toBe(2);
+      expect(result.failed).toBe(0);
+      expect(result.scenarios).toEqual([
+        expect.objectContaining({
+          id: "command-advertisements",
+          status: "passed",
+          details: expect.objectContaining({
+            observedCommands: ["/commands", "/help", "/status"],
+          }),
+        }),
+        expect.objectContaining({
+          id: "chunked-commands",
+          status: "passed",
+          details: expect.objectContaining({
+            ackReactionBody: ":eyes:",
+            chunkCount: 2,
+            chunkMessageIds: ["502", "504"],
+            sentMessageId: "501",
+          }),
+        }),
+      ]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("runs direct-message blackbox scenarios", async () => {
     const outputDir = await mkdtemp(path.join(os.tmpdir(), "keybase-blackbox-dm-suite-"));
     cleanups.push(async () => {

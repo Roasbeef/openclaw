@@ -43,6 +43,8 @@ export interface KeybaseDockerBlackboxResult {
 export type KeybaseDockerBlackboxScenarioId =
   | "allowlist-block"
   | "canary"
+  | "chunked-commands"
+  | "command-advertisements"
   | "dm-canary"
   | "dm-pairing"
   | "help-command"
@@ -82,6 +84,8 @@ const DEFAULT_BLACKBOX_ACK_REACTION = ":eyes:";
 const DEFAULT_BLACKBOX_SCENARIOS: readonly KeybaseDockerBlackboxScenarioId[] = [
   "canary",
   "help-command",
+  "command-advertisements",
+  "chunked-commands",
   "dm-pairing",
   "dm-canary",
   "mention-gating",
@@ -282,7 +286,7 @@ Generated scaffold for a local Keybase-backed OpenClaw smoke run.
    - \`pnpm keybase:smoke:blackbox --output-dir . --team "$KEYBASE_TEST_TEAM" --bot "$KEYBASE_TEST_BOT_USERNAME"\`
 9. Full QA runner:
    - \`pnpm openclaw qa keybase --output-dir . --team "$KEYBASE_TEST_TEAM" --bot "$KEYBASE_TEST_BOT_USERNAME"\`
-   - covers team-channel canary reply, tagged help command, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation
+   - covers team-channel canary reply, tagged help command, native command advertisements, chunked command delivery, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation
 
 ## Notes
 
@@ -631,6 +635,43 @@ function findBotReplyToMessage(params: {
   );
 }
 
+function findBotTextRepliesToMessage(params: {
+  botUsername: string;
+  messages: readonly KeybaseMessageSummary[];
+  sentMessageId: string;
+  startedAt: number;
+}): KeybaseMessageSummary[] {
+  const normalizedBot = normalizeUsername(params.botUsername);
+  const exactReplies = params.messages.filter((entry) => {
+    const msg = entry.msg;
+    return Boolean(
+      msg &&
+      readMessageSender(entry) === normalizedBot &&
+      msg.content?.type === "text" &&
+      readTextReplyToId(entry) === params.sentMessageId,
+    );
+  });
+  const replies =
+    exactReplies.length > 0
+      ? exactReplies
+      : params.messages.filter((entry) => {
+          const msg = entry.msg;
+          return Boolean(
+            msg &&
+            readMessageSender(entry) === normalizedBot &&
+            msg.content?.type === "text" &&
+            (msg.sent_at_ms ?? 0) >= params.startedAt,
+          );
+        });
+  return [...replies].toSorted((left, right) => {
+    const sentDiff = (left.msg?.sent_at_ms ?? 0) - (right.msg?.sent_at_ms ?? 0);
+    if (sentDiff !== 0) {
+      return sentDiff;
+    }
+    return Number(normalizeMessageId(left.msg?.id)) - Number(normalizeMessageId(right.msg?.id));
+  });
+}
+
 function findBotReactionToMessage(params: {
   botUsername: string;
   expectedBody?: string;
@@ -778,6 +819,34 @@ async function readKeybaseMessagesInSender(params: {
     },
   });
   return readResult.messages ?? [];
+}
+
+function normalizeAdvertisedCommandName(value: string): string {
+  const trimmed = value.trim().replace(/^\/+/, "");
+  return trimmed ? `/${trimmed.toLowerCase()}` : "";
+}
+
+function collectAdvertisedCommandNames(value: unknown, names = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectAdvertisedCommandNames(entry, names);
+    }
+    return names;
+  }
+  if (typeof value !== "object" || value === null) {
+    return names;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.name === "string") {
+    const commandName = normalizeAdvertisedCommandName(record.name);
+    if (commandName) {
+      names.add(commandName);
+    }
+  }
+  for (const nested of Object.values(record)) {
+    collectAdvertisedCommandNames(nested, names);
+  }
+  return names;
 }
 
 function findDefaultTeamConversationId(params: {
@@ -1008,6 +1077,102 @@ async function waitForBlackboxReply(params: {
   }
   throw new Error(
     `Timed out waiting for Keybase blackbox reply; last channel error: ${lastStatusError ?? "none"}`,
+  );
+}
+
+async function waitForChunkedBotReply(params: {
+  botUsername: string;
+  composeFile: string;
+  conversation: KeybaseBlackboxConversation;
+  cwd: string;
+  envFile: string;
+  expectedAckReaction?: string | false;
+  expectedFragments: readonly string[];
+  minChunks: number;
+  runCommand: RunCommand;
+  sentMessageId: string;
+  startedAt: number;
+  timeoutMs: number;
+}): Promise<{
+  ackReactionBody?: string;
+  ackReactionMessageId?: string;
+  chunkCount: number;
+  chunkMessageIds: string[];
+  combinedPreview: string;
+  inboundAt: number;
+  outboundAt: number;
+}> {
+  const deadline = Date.now() + params.timeoutMs;
+  let lastStatusError: string | null = null;
+  const expectedAckReaction =
+    params.expectedAckReaction === false
+      ? undefined
+      : normalizeReactionBody(params.expectedAckReaction ?? DEFAULT_BLACKBOX_ACK_REACTION);
+  while (Date.now() < deadline) {
+    let hasFreshStatus = false;
+    let inboundAt = 0;
+    let outboundAt = 0;
+    try {
+      const status = await readChannelStatus(params);
+      lastStatusError = status.lastError;
+      inboundAt = status.inboundAt;
+      outboundAt = status.outboundAt;
+      hasFreshStatus =
+        status.running &&
+        status.inboundAt >= params.startedAt &&
+        status.outboundAt >= params.startedAt;
+    } catch (error) {
+      lastStatusError = String(error);
+    }
+
+    const messages = await readKeybaseMessagesInSender({
+      composeFile: params.composeFile,
+      conversation: params.conversation,
+      cwd: params.cwd,
+      envFile: params.envFile,
+      num: 50,
+      runCommand: params.runCommand,
+    });
+    const replies = findBotTextRepliesToMessage({
+      botUsername: params.botUsername,
+      messages,
+      sentMessageId: params.sentMessageId,
+      startedAt: params.startedAt,
+    });
+    const reaction = expectedAckReaction
+      ? findBotReactionToMessage({
+          botUsername: params.botUsername,
+          expectedBody: expectedAckReaction,
+          messages,
+          sentMessageId: params.sentMessageId,
+        })
+      : undefined;
+    const combined = replies.map((reply) => readMessageBody(reply)).join("\n");
+    const includesExpectedFragments = params.expectedFragments.every((fragment) =>
+      combined.includes(fragment),
+    );
+    if (
+      hasFreshStatus &&
+      replies.length >= params.minChunks &&
+      includesExpectedFragments &&
+      (!expectedAckReaction || reaction)
+    ) {
+      const reactionBody = reaction ? readReactionBody(reaction) : undefined;
+      const reactionMessageId = normalizeMessageId(reaction?.msg?.id);
+      return {
+        ...(reactionBody ? { ackReactionBody: reactionBody } : {}),
+        ...(reactionMessageId ? { ackReactionMessageId: reactionMessageId } : {}),
+        chunkCount: replies.length,
+        chunkMessageIds: replies.map((reply) => normalizeMessageId(reply.msg?.id)).filter(Boolean),
+        combinedPreview: combined.slice(0, 240),
+        inboundAt,
+        outboundAt,
+      };
+    }
+    await sleep(3000);
+  }
+  throw new Error(
+    `Timed out waiting for chunked Keybase bot reply; last channel error: ${lastStatusError ?? "none"}`,
   );
 }
 
@@ -1402,6 +1567,32 @@ async function installAllowedGroupSender(
   };
 }
 
+async function installTextChunkLimit(
+  context: KeybaseBlackboxContext,
+  limit: number,
+): Promise<() => Promise<void>> {
+  const configFile = keybaseConfigPath(context.outputDir);
+  const config = await readJsonObjectFile(configFile);
+  const channels = getOrCreateJsonObject(config, "channels");
+  const keybase = getOrCreateJsonObject(channels, "keybase");
+  const hadPrevious = Object.hasOwn(keybase, "textChunkLimit");
+  const previous = keybase.textChunkLimit;
+  keybase.textChunkLimit = limit;
+  await writeJsonObjectFile(configFile, config);
+
+  return async () => {
+    const next = await readJsonObjectFile(configFile);
+    const nextChannels = getOrCreateJsonObject(next, "channels");
+    const nextKeybase = getOrCreateJsonObject(nextChannels, "keybase");
+    if (hadPrevious) {
+      nextKeybase.textChunkLimit = previous;
+    } else {
+      delete nextKeybase.textChunkLimit;
+    }
+    await writeJsonObjectFile(configFile, next);
+  };
+}
+
 async function ensureBaseQaConfig(params: { outputDir: string; team: string }): Promise<void> {
   const configFile = keybaseConfigPath(params.outputDir);
   await fs.rm(keybasePairingStorePath(params.outputDir), { force: true });
@@ -1618,6 +1809,105 @@ async function runHelpCommandProbe(params: {
     };
   } finally {
     await restoreConfig();
+    await restartKeybaseGateway(params.context);
+  }
+}
+
+async function waitForKeybaseCommandAdvertisements(params: {
+  context: KeybaseBlackboxContext;
+  expectedCommands: readonly string[];
+  timeoutMs: number;
+}): Promise<{ commandCount: number; commands: string[] }> {
+  const expected = params.expectedCommands.map(normalizeAdvertisedCommandName);
+  const deadline = Date.now() + params.timeoutMs;
+  let observed: string[] = [];
+  while (Date.now() < deadline) {
+    const result = await runKeybaseApiInService<unknown>({
+      composeFile: params.context.composeFile,
+      cwd: params.context.outputDir,
+      envFile: params.context.envFile,
+      runCommand: params.context.runCommand,
+      service: SENDER_SERVICE,
+      request: {
+        method: "listcommands",
+        params: {
+          options: {
+            conversation_id: params.context.conversationId,
+          },
+        },
+      },
+    });
+    observed = [...collectAdvertisedCommandNames(result)].toSorted();
+    if (expected.every((command) => observed.includes(command))) {
+      return {
+        commandCount: observed.length,
+        commands: observed,
+      };
+    }
+    await sleep(3000);
+  }
+  throw new Error(
+    `Timed out waiting for Keybase command advertisements; observed: ${observed.join(", ") || "none"}`,
+  );
+}
+
+async function runCommandAdvertisementProbe(params: {
+  context: KeybaseBlackboxContext;
+  timeoutMs: number;
+}): Promise<Record<string, unknown>> {
+  const result = await waitForKeybaseCommandAdvertisements({
+    context: params.context,
+    expectedCommands: ["/help", "/status", "/commands"],
+    timeoutMs: params.timeoutMs,
+  });
+  return {
+    commandCount: result.commandCount,
+    observedCommands: result.commands.filter((command) =>
+      ["/commands", "/help", "/status"].includes(command),
+    ),
+  };
+}
+
+async function runChunkedCommandsProbe(params: {
+  context: KeybaseBlackboxContext;
+  timeoutMs: number;
+}): Promise<Record<string, unknown>> {
+  const restoreSender = await installAllowedGroupSender(params.context);
+  const restoreChunkLimit = await installTextChunkLimit(params.context, 160);
+  try {
+    await restartKeybaseGateway(params.context);
+    const startedAt = Date.now();
+    const sentMessageId = await sendKeybaseBlackboxMessage({
+      body: `@${params.context.botUsername} /commands`,
+      context: params.context,
+    });
+    const reply = await waitForChunkedBotReply({
+      botUsername: params.context.botUsername,
+      composeFile: params.context.composeFile,
+      conversation: { conversation_id: params.context.conversationId },
+      cwd: params.context.outputDir,
+      envFile: params.context.envFile,
+      expectedAckReaction: DEFAULT_BLACKBOX_ACK_REACTION,
+      expectedFragments: ["/help", "/status"],
+      minChunks: 2,
+      runCommand: params.context.runCommand,
+      sentMessageId,
+      startedAt,
+      timeoutMs: params.timeoutMs,
+    });
+    return {
+      ...(reply.ackReactionBody ? { ackReactionBody: reply.ackReactionBody } : {}),
+      ...(reply.ackReactionMessageId ? { ackReactionMessageId: reply.ackReactionMessageId } : {}),
+      chunkCount: reply.chunkCount,
+      chunkMessageIds: reply.chunkMessageIds,
+      inboundAt: reply.inboundAt,
+      outboundAt: reply.outboundAt,
+      replyPreview: reply.combinedPreview,
+      sentMessageId,
+    };
+  } finally {
+    await restoreChunkLimit();
+    await restoreSender();
     await restartKeybaseGateway(params.context);
   }
 }
@@ -1846,6 +2136,18 @@ export async function runKeybaseDockerBlackboxSuite(
             context,
             marker,
             prefix: "keybase blackbox canary ok",
+            timeoutMs,
+          });
+          break;
+        case "command-advertisements":
+          details = await runCommandAdvertisementProbe({
+            context,
+            timeoutMs,
+          });
+          break;
+        case "chunked-commands":
+          details = await runChunkedCommandsProbe({
+            context,
             timeoutMs,
           });
           break;
