@@ -49,7 +49,7 @@ describe("writeKeybaseDockerSmokeFiles", () => {
     expect(compose).toContain("image: openclaw:keybase-test");
     expect(compose).toContain("platform: linux/amd64");
     expect(compose).toContain('      - "18889:18789"');
-    expect(compose).toContain("/app/extensions/keybase/docker/container-entrypoint.mjs");
+    expect(compose).toContain("/app/extensions/keybase/docker/keybase-entrypoint.sh");
     expect(compose).toContain("CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}");
     expect(compose).toContain("KEYBASE_USERNAME: ${KEYBASE_USERNAME:-}");
     expect(compose).toContain("KEYBASE_PAPERKEY_FILE: ${KEYBASE_PAPERKEY_FILE:-}");

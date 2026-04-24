@@ -131,8 +131,7 @@ function renderCompose(params: { gatewayPort: number; imageName: string; platfor
     init: true
     restart: unless-stopped
     entrypoint:
-      - node
-      - /app/extensions/keybase/docker/container-entrypoint.mjs
+      - /app/extensions/keybase/docker/keybase-entrypoint.sh
     command:
       - node
       - dist/index.js
@@ -217,8 +216,7 @@ function renderCompose(params: { gatewayPort: number; imageName: string; platfor
       - ./state/sender-home:/home/node
     init: true
     entrypoint:
-      - node
-      - /app/extensions/keybase/docker/container-entrypoint.mjs
+      - /app/extensions/keybase/docker/keybase-entrypoint.sh
     command:
       - sleep
       - infinity

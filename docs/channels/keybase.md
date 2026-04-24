@@ -273,6 +273,42 @@ harness defaults to `/tmp/openclaw-keybase/keybased.sock`.
 
 Do not run one Keybase identity behind multiple replicas.
 
+## Kubernetes and Vault
+
+The Keybase Docker layer includes
+`/app/extensions/keybase/docker/keybase-entrypoint.sh` for production-style
+deployments. It sources shell env files before running the normal Keybase
+bootstrap entrypoint, so Vault Agent Injector templates can write files like
+`/vault/secrets/keybase.sh` and `/vault/secrets/claude.sh`.
+
+Example injected env:
+
+```sh
+export KEYBASE_USERNAME="openclaw-bot"
+export KEYBASE_PAPERKEY="..."
+export CLAUDE_CODE_OAUTH_TOKEN="..."
+```
+
+Recommended Kubernetes shape:
+
+- Use `strategy.type: Recreate`.
+- Set `replicas: 1` for each Keybase identity.
+- Mount persistent OpenClaw and Keybase state at `/home/node`.
+- Keep `OPENCLAW_KEYBASE_SOCKET_FILE` and `OPENCLAW_KEYBASE_PID_FILE` under
+  container-local `/tmp/openclaw-keybase`.
+- Set the model to `claude-cli/claude-sonnet-4-6` and pass
+  `CLAUDE_CODE_OAUTH_TOKEN` to the Claude child process through the
+  `cliBackends.claude-cli.env` config.
+- Source provider and Keybase secrets from files or env; do not commit paper
+  keys or OAuth tokens into images or Helm values.
+
+Optional GitHub setup:
+
+- Set `OPENCLAW_CONFIGURE_GITHUB_TOKEN=1` when `GITHUB_TOKEN` is present and you
+  want the entrypoint to configure `git` HTTPS credentials.
+- If the image includes the GitHub CLI, the same flag best-effort logs `gh` in
+  with that token.
+
 ## Local Docker smoke
 
 The repo now includes an isolated local smoke harness for Keybase:
@@ -293,9 +329,11 @@ Notes:
 - The generated smoke config defaults the agent model to
   `claude-cli/claude-sonnet-4-6` only. It does not use normal Anthropic
   provider auth.
-- The gateway container uses `/app/extensions/keybase/docker/container-entrypoint.mjs`
-  to sync the local Keybase baseline into `state/home/.openclaw/openclaw.json`, run
-  the verified service bootstrap with the mounted paper key, and then start the gateway.
+- The gateway container starts with
+  `/app/extensions/keybase/docker/keybase-entrypoint.sh`, which sources optional
+  secret env files and delegates to `container-entrypoint.mjs` to sync the local
+  Keybase baseline into `state/home/.openclaw/openclaw.json`, run the verified
+  service bootstrap with the mounted paper key, and then start the gateway.
 - The smoke harness persists the Keybase home under `state/home`, but keeps the
   service socket and pid file under container-local `/tmp/openclaw-keybase` to
   avoid Docker Desktop shared-volume Unix socket issues.

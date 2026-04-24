@@ -22,6 +22,10 @@ read_when:
   `/subagents list` and `/subagents spawn`. The spawn scenario allowlists the
   sender before the probe, verifies the immediate spawn acknowledgement, then
   waits for same-chat completion text from the spawned subagent.
+- Phase 4 has started: the Keybase Docker layer now has a production wrapper
+  entrypoint that can source Vault Agent env scripts before Keybase bootstrap,
+  while the lower-level Node entrypoint still owns config baseline repair,
+  `keybase` oneshot, and process supervision.
 - Ad hoc live probes showed that unauthorized tagged control commands could
   previously receive the ack reaction before command authorization rejected the
   command. Keybase now suppresses ack reactions for unauthorized group control
@@ -182,7 +186,9 @@ Containerize the Keybase-backed fork for Lightning Labs infrastructure.
 Scope:
 
 - OpenClaw image with Keybase installed
-- entrypoint that resolves secrets and runs `keybase oneshot`
+- entrypoint that resolves secrets and runs `keybase oneshot` (started:
+  `extensions/keybase/docker/keybase-entrypoint.sh` sources `/vault/secrets/*.sh`
+  before delegating to `container-entrypoint.mjs`)
 - persistent state for OpenClaw and Keybase home
 - optional shared repo volume for coding agents
 
@@ -196,6 +202,10 @@ Implementation notes:
   - source secrets
   - run `keybase oneshot`
   - start the long-running bot process
+- Vault Agent deployments should write shell env files under `/vault/secrets`.
+  The wrapper entrypoint sources those files before the Node entrypoint reads
+  `KEYBASE_USERNAME`, `KEYBASE_PAPERKEY`, `KEYBASE_PAPERKEY_FILE`, and
+  `CLAUDE_CODE_OAUTH_TOKEN`.
 - Persist at least:
   - `~/.openclaw`
   - Keybase home/service state

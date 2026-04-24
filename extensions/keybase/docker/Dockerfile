@@ -19,7 +19,8 @@ COPY --chown=node:node extensions/keybase /app/extensions/keybase
 ENV KEYBASE_SERVICE=1
 
 RUN npm install -g @anthropic-ai/claude-code && \
-    chmod 755 /usr/bin/keybase /usr/bin/kbfsfuse && \
+    chmod 755 /usr/bin/keybase /usr/bin/kbfsfuse \
+      /app/extensions/keybase/docker/keybase-entrypoint.sh && \
     install -d -o node -g node /home/node
 
 USER node
