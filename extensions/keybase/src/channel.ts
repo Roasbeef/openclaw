@@ -27,7 +27,9 @@ import {
   resolveDefaultKeybaseAccountId,
   resolveKeybaseAccount,
 } from "./accounts.js";
+import { keybaseApprovalCapability } from "./approval-native.js";
 import { KeybaseChannelConfigSchema } from "./config-schema.js";
+import { shouldSuppressLocalKeybaseExecApprovalPrompt } from "./exec-approvals.js";
 import { keybaseGatewayAdapter } from "./gateway.js";
 import { resolveKeybaseGroupMatch, resolveKeybaseGroupRequireMention } from "./groups.js";
 import { stripKeybaseBotMention } from "./mentions.js";
@@ -273,6 +275,7 @@ export const keybasePlugin = createChatChannelPlugin({
     },
     status: keybaseStatusAdapter,
     gateway: keybaseGatewayAdapter,
+    approvalCapability: keybaseApprovalCapability,
   },
   pairing: {
     text: {
@@ -310,6 +313,12 @@ export const keybasePlugin = createChatChannelPlugin({
       chunker: chunkTextForOutbound,
       chunkerMode: "markdown",
       textChunkLimit: 4000,
+      shouldSuppressLocalPayloadPrompt: ({ cfg, accountId, payload }) =>
+        shouldSuppressLocalKeybaseExecApprovalPrompt({
+          cfg,
+          accountId,
+          payload,
+        }),
       resolveEffectiveTextChunkLimit: ({ cfg, accountId }) =>
         resolveKeybaseTextChunkLimit(resolveKeybaseAccount({ cfg: cfg as CoreConfig, accountId })),
     },

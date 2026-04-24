@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   sendKeybaseText: vi.fn(async () => ({ messageId: "sent-1" })),
   sendKeybaseTextChunks: vi.fn(async () => ({ messageId: "sent-1", sent: 1 })),
   syncKeybaseCommandAdvertisements: vi.fn(async () => ({ advertised: 1, cleared: false })),
+  resolveKeybaseApproval: vi.fn(async () => {}),
 }));
 
 vi.mock("./client.js", async () => {
@@ -32,7 +33,19 @@ vi.mock("./runtime.js", async () => {
   };
 });
 
+vi.mock("./exec-approval-resolver.js", async () => {
+  const actual = await vi.importActual<typeof import("./exec-approval-resolver.js")>(
+    "./exec-approval-resolver.js",
+  );
+  return {
+    ...actual,
+    resolveKeybaseApproval: mocks.resolveKeybaseApproval,
+  };
+});
+
 const { keybaseGatewayAdapter } = await import("./gateway.js");
+const { registerKeybaseApprovalReactionTarget, clearKeybaseApprovalReactionTargetsForTest } =
+  await import("./approval-reactions.js");
 
 function buildAccount(overrides: Partial<ResolvedKeybaseAccount> = {}): ResolvedKeybaseAccount {
   return {
@@ -56,16 +69,17 @@ function buildAccount(overrides: Partial<ResolvedKeybaseAccount> = {}): Resolved
   };
 }
 
-function createRuntimeHarness() {
+function createRuntimeHarness(options?: { commandAuthorized?: boolean }) {
   const recordInboundSession = vi.fn(async () => {});
   const dispatchReplyWithBufferedBlockDispatcher = vi.fn(async ({ dispatcherOptions }) => {
     await dispatcherOptions.deliver({ text: "reply from agent" });
   });
+  const commandAuthorized = options?.commandAuthorized ?? true;
   return {
     channelRuntime: {
       commands: {
         shouldComputeCommandAuthorized: vi.fn(() => true),
-        resolveCommandAuthorizedFromAuthorizers: vi.fn(() => true),
+        resolveCommandAuthorizedFromAuthorizers: vi.fn(() => commandAuthorized),
       },
       routing: {
         resolveAgentRoute: vi.fn(({ accountId, peer }) => ({
@@ -130,6 +144,42 @@ function buildTextEvent(params: {
   };
 }
 
+function buildReactionEvent(params: {
+  conversationId?: string;
+  id?: number;
+  messageId: number;
+  reactionBody: string;
+  senderUsername?: string;
+  teamName?: string;
+  topicName?: string;
+}): KeybaseListenEvent {
+  return {
+    type: "chat",
+    raw: {},
+    message: {
+      id: params.id ?? 45,
+      raw: {},
+      conversationId: params.conversationId ?? "conv-1",
+      atMentionUsernames: [],
+      channel: {
+        name: params.teamName ?? "openclaw,sender",
+        ...(params.topicName ? { membersType: "team", topicName: params.topicName } : {}),
+      },
+      sender: {
+        username: params.senderUsername ?? "sender",
+      },
+      content: {
+        type: "reaction",
+        raw: {},
+        reaction: {
+          body: params.reactionBody,
+          messageId: params.messageId,
+        },
+      },
+    },
+  };
+}
+
 describe("keybaseGatewayAdapter.startAccount", () => {
   afterEach(() => {
     mocks.startKeybaseApiListen.mockReset();
@@ -138,6 +188,8 @@ describe("keybaseGatewayAdapter.startAccount", () => {
     mocks.sendKeybaseText.mockClear();
     mocks.sendKeybaseTextChunks.mockClear();
     mocks.syncKeybaseCommandAdvertisements.mockClear();
+    mocks.resolveKeybaseApproval.mockClear();
+    clearKeybaseApprovalReactionTargetsForTest();
   });
 
   it("issues a pairing challenge for unknown DM senders", async () => {
@@ -225,6 +277,11 @@ describe("keybaseGatewayAdapter.startAccount", () => {
         }),
       );
     });
+    const dispatchCall = harness.dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0] as
+      | { ctx?: Record<string, unknown> }
+      | undefined;
+    expect(dispatchCall?.ctx?.OriginatingChannel).toBe("keybase");
+    expect(dispatchCall?.ctx?.OriginatingTo).toBe("conv:conv-2");
 
     abort.abort();
     await task;
@@ -386,6 +443,8 @@ describe("keybaseGatewayAdapter.startAccount", () => {
       | { ctx?: Record<string, unknown>; replyOptions?: Record<string, unknown> }
       | undefined;
     expect(dispatchCall?.ctx?.ChatType).toBe("group");
+    expect(dispatchCall?.ctx?.To).toBe("conv:conv-team-1");
+    expect(dispatchCall?.ctx?.OriginatingTo).toBe("conv:conv-team-1");
     expect(dispatchCall?.ctx?.BotUsername).toBe("openclaw");
     expect(dispatchCall?.ctx?.WasMentioned).toBe(true);
     expect(dispatchCall?.ctx?.GroupSystemPrompt).toBe("Stay focused on infra tasks.");
@@ -452,6 +511,138 @@ describe("keybaseGatewayAdapter.startAccount", () => {
     expect(dispatchCall?.ctx?.CommandBody).toBe("/approve abc12345 allow-once");
     expect(dispatchCall?.ctx?.BodyForCommands).toBe("/approve abc12345 allow-once");
     expect(dispatchCall?.ctx?.BotUsername).toBe("openclaw");
+
+    abort.abort();
+    await task;
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("does not ack unauthorized tagged group control commands", async () => {
+    const stop = vi.fn();
+    mocks.startKeybaseApiListen.mockReturnValue({
+      child: {} as never,
+      stop,
+    });
+    const harness = createRuntimeHarness({ commandAuthorized: false });
+    const abort = new AbortController();
+    const ctx = createStartAccountContext({
+      account: buildAccount({
+        groupPolicy: "allowlist",
+        groups: {
+          "team:lightninglabs#lbottest": {
+            allowFrom: [],
+            requireMention: true,
+          },
+        },
+      }),
+      abortSignal: abort.signal,
+      cfg: {
+        messages: { ackReaction: ":eyes:", ackReactionScope: "group-mentions" },
+        commands: { useAccessGroups: true },
+      } as never,
+    });
+    Object.assign(ctx, { channelRuntime: harness.channelRuntime });
+
+    const task = keybaseGatewayAdapter.startAccount!(ctx);
+
+    await vi.waitFor(() => expect(mocks.startKeybaseApiListen).toHaveBeenCalledOnce());
+    const args = mocks.startKeybaseApiListen.mock.calls[0]?.[0] as {
+      onEvent: (event: KeybaseListenEvent) => void;
+    };
+    args.onEvent(
+      buildTextEvent({
+        body: "@openclaw /subagents list",
+        conversationId: "conv-team-unauthorized-command",
+        id: 101,
+        teamName: "lightninglabs",
+        topicName: "lbottest",
+        atMentionUsernames: ["openclaw"],
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(harness.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+    });
+    expect(mocks.sendKeybaseReaction).not.toHaveBeenCalled();
+
+    abort.abort();
+    await task;
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("resolves registered approval reactions from authorized Keybase senders", async () => {
+    const stop = vi.fn();
+    mocks.startKeybaseApiListen.mockReturnValue({
+      child: {} as never,
+      stop,
+    });
+    const harness = createRuntimeHarness();
+    const abort = new AbortController();
+    const ctx = createStartAccountContext({
+      account: buildAccount({
+        groupPolicy: "allowlist",
+        groups: {
+          "team:lightninglabs#lbottest": {
+            allowFrom: [],
+            requireMention: true,
+          },
+        },
+        config: {
+          execApprovals: {
+            enabled: true,
+            approvers: ["sender"],
+          },
+        },
+      }),
+      abortSignal: abort.signal,
+      cfg: {
+        channels: {
+          keybase: {
+            username: "openclaw",
+            paperKey: "paper key",
+            execApprovals: {
+              enabled: true,
+              approvers: ["sender"],
+            },
+          },
+        },
+      } as never,
+    });
+    Object.assign(ctx, { channelRuntime: harness.channelRuntime });
+    registerKeybaseApprovalReactionTarget({
+      accountId: "default",
+      targetKey: "team:lightninglabs#lbottest",
+      messageId: 700,
+      approvalId: "approval-123",
+      allowedDecisions: ["allow-once", "deny"],
+    });
+
+    const task = keybaseGatewayAdapter.startAccount!(ctx);
+
+    await vi.waitFor(() => expect(mocks.startKeybaseApiListen).toHaveBeenCalledOnce());
+    const args = mocks.startKeybaseApiListen.mock.calls[0]?.[0] as {
+      onEvent: (event: KeybaseListenEvent) => void;
+    };
+    args.onEvent(
+      buildReactionEvent({
+        conversationId: "conv-team-command",
+        messageId: 700,
+        reactionBody: ":white_check_mark:",
+        teamName: "LightningLabs",
+        topicName: "lbottest",
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(mocks.resolveKeybaseApproval).toHaveBeenCalledWith(
+        expect.objectContaining({
+          approvalId: "approval-123",
+          decision: "allow-once",
+          senderId: "sender",
+        }),
+      );
+    });
+    expect(harness.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
 
     abort.abort();
     await task;

@@ -13,6 +13,19 @@ read_when:
 
 - Phase 0 transport spike is complete in `extensions/keybase`.
 - Phase 1 is mostly complete.
+- Phase 2 is complete for command advertisements, chunking, text approvals, and
+  opt-in reaction approvals.
+- Phase 3 is underway: same-chat detached delivery targets and `/subagents`
+  command QA are covered; reply-to-subagent targeting remains limited by
+  Keybase's lack of durable child threads.
+- Current Phase 3 coverage includes deterministic blackbox scenarios for
+  `/subagents list` and `/subagents spawn`. The spawn scenario allowlists the
+  sender before the probe, verifies the immediate spawn acknowledgement, then
+  waits for same-chat completion text from the spawned subagent.
+- Ad hoc live probes showed that unauthorized tagged control commands could
+  previously receive the ack reaction before command authorization rejected the
+  command. Keybase now suppresses ack reactions for unauthorized group control
+  commands so the reaction remains a handled-work signal.
 - Current phase 1 baseline is implemented and live-blackbox validated locally:
   - bundled plugin scaffold
   - DM ingress
@@ -23,7 +36,7 @@ read_when:
   - per-group `skills`
   - directory and security warning wiring
   - official docs, channel index, setup visibility, and QA runner exposure
-  - two-container live blackbox QA for group canary, tagged help command, DM canary, pairing, mention gating, allowlist blocking, restart resume, and ack reaction observation
+  - two-container live blackbox QA for group canary, tagged help command, command advertisements, chunking, DM canary, pairing, `/subagents list`, `/subagents spawn`, mention gating, allowlist blocking, restart resume, and ack reaction observation
 
 ## Goals
 
@@ -136,9 +149,9 @@ Scope:
 - bot command advertisements (implemented: startup syncs slash command catalog through
   Keybase `advertisecommands`; `commands.native=false` clears published commands)
 - native or text-fallback approvals (implemented: shared `/approve` text
-  fallback works in authorized Keybase DMs and tagged team chats; reaction
-  shortcuts are intentionally deferred until approval prompt bindings are
-  durable)
+  fallback works in authorized Keybase DMs and tagged team chats; opt-in native
+  approval delivery binds reaction shortcuts to bot-authored approval prompt
+  message ids and configured approvers)
 - better outbound formatting and chunking (implemented: default markdown-aware
   text chunking with `textChunkLimit`)
 - richer directory and resolver behavior
@@ -151,14 +164,16 @@ Bring multi-agent UX to parity.
 Scope:
 
 - same-chat async subagent updates
-- explicit agent targeting
-- `status` and `cancel`
+- explicit agent targeting through `/subagents send` and `/subagents steer`
+- `status`, `cancel`, and `/subagents list`
 - reply-to-bot as session continuation
 - reply-to-subagent as targeted continuation where possible
 
 Known risk:
 
-- Keybase does not obviously give us Discord-style child threads. If persistent per-subagent thread routing is required, we likely need a reply-bound session seam in OpenClaw core instead of a plugin-only workaround.
+- Keybase does not give us Discord-style child threads. Persistent per-subagent
+  reply targeting likely needs a reply-bound session seam in OpenClaw core
+  instead of a plugin-only workaround.
 
 ## Phase 4
 
@@ -238,7 +253,7 @@ Use a staged validation path instead of jumping straight to a live Keybase bot:
 4. Live Keybase smoke against a restricted bot and a dedicated test team/channel.
    - Repeatable lane: `pnpm openclaw qa keybase --output-dir .artifacts/keybase-docker --team lbottest --bot lbottestbot`
    - The runner installs the requested `team#general` route into the local smoke config before assertions.
-   - Covered contract: team-channel canary reply, tagged help command, native command advertisement discovery, chunked command delivery, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation.
+   - Covered contract: team-channel canary reply, tagged help command, native command advertisement discovery, chunked command delivery, DM canary reply, DM pairing challenge, `/subagents list`, `/subagents spawn` with same-chat completion, mention gating, group allowlist block, restart resume, and ack reaction observation.
 5. Helm and EKS rollout.
 
 ## Local Smoke Plan

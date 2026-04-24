@@ -22,6 +22,8 @@ import {
   buildKeybaseAttachRequest,
   buildKeybaseAdvertiseCommandsRequest,
   buildKeybaseClearCommandsRequest,
+  buildKeybaseDeleteRequest,
+  buildKeybaseEditRequest,
   buildKeybaseReactionRequest,
   buildKeybaseSendRequest,
   type KeybaseCommandDefinition,
@@ -364,6 +366,50 @@ export async function sendKeybaseReaction(params: {
   return {
     messageId: normalizeMessageId(result.id ?? result.outbox_id),
   };
+}
+
+export async function editKeybaseText(params: {
+  account: ResolvedKeybaseAccount;
+  messageId: string;
+  text: string;
+  to: string;
+  deps?: Partial<RuntimeDeps>;
+}): Promise<void> {
+  const conversationRef = resolveKeybaseConversationRef(params.to);
+  if (!conversationRef) {
+    throw new Error(`Invalid Keybase target: ${params.to}`);
+  }
+  const runtimeDeps = { ...defaultRuntimeDeps, ...params.deps };
+  await ensureKeybaseAccountPrepared(params.account, runtimeDeps);
+  await runtimeDeps.apiRequest(
+    buildKeybaseEditRequest({
+      ...conversationRef,
+      body: params.text,
+      messageId: parseMessageId(params.messageId),
+    }),
+    resolveCliOptions(params.account),
+  );
+}
+
+export async function deleteKeybaseMessage(params: {
+  account: ResolvedKeybaseAccount;
+  messageId: string;
+  to: string;
+  deps?: Partial<RuntimeDeps>;
+}): Promise<void> {
+  const conversationRef = resolveKeybaseConversationRef(params.to);
+  if (!conversationRef) {
+    throw new Error(`Invalid Keybase target: ${params.to}`);
+  }
+  const runtimeDeps = { ...defaultRuntimeDeps, ...params.deps };
+  await ensureKeybaseAccountPrepared(params.account, runtimeDeps);
+  await runtimeDeps.apiRequest(
+    buildKeybaseDeleteRequest({
+      ...conversationRef,
+      messageId: parseMessageId(params.messageId),
+    }),
+    resolveCliOptions(params.account),
+  );
 }
 
 function resolveLocalMediaPath(mediaUrl: string): string | null {

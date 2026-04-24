@@ -2,6 +2,8 @@ import type { NativeCommandSpec } from "openclaw/plugin-sdk/command-auth";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   normalizeKeybaseReactionBody,
+  deleteKeybaseMessage,
+  editKeybaseText,
   resolveKeybaseTextChunkLimit,
   resetKeybasePreparedAccountCache,
   sendKeybaseMedia,
@@ -150,6 +152,57 @@ describe("Keybase runtime helpers", () => {
             message: {
               body: ":eyes:",
             },
+          }),
+        },
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it("edits and deletes messages through the Keybase JSON API", async () => {
+    const apiRequest = vi.fn().mockResolvedValue({});
+    const deps = {
+      apiRequest,
+      configureNotificationSettings: vi.fn().mockResolvedValue(undefined),
+      oneshot: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await editKeybaseText({
+      account,
+      to: "team:lightninglabs#ops",
+      messageId: "41",
+      text: "updated",
+      deps,
+    });
+    await deleteKeybaseMessage({
+      account,
+      to: "team:lightninglabs#ops",
+      messageId: "41",
+      deps,
+    });
+
+    expect(apiRequest).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        method: "edit",
+        params: {
+          options: expect.objectContaining({
+            message_id: 41,
+            message: {
+              body: "updated",
+            },
+          }),
+        },
+      }),
+      expect.any(Object),
+    );
+    expect(apiRequest).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        method: "delete",
+        params: {
+          options: expect.objectContaining({
+            message_id: 41,
           }),
         },
       }),

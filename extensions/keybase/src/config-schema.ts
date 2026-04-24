@@ -15,6 +15,17 @@ const KeybaseCommandsConfigSchema = z
   .strict()
   .optional();
 
+const KeybaseExecApprovalsConfigSchema = z
+  .object({
+    enabled: z.union([z.boolean(), z.literal("auto")]).optional(),
+    approvers: AllowFromListSchema,
+    agentFilter: z.array(z.string()).optional(),
+    sessionFilter: z.array(z.string()).optional(),
+    target: z.enum(["dm", "channel", "both"]).optional(),
+  })
+  .strict()
+  .optional();
+
 export const KeybaseGroupConfigSchema = z
   .object({
     allowFrom: AllowFromListSchema,
@@ -42,6 +53,7 @@ export const KeybaseAccountConfigSchema = z
     enableTyping: z.boolean().optional(),
     textChunkLimit: z.number().int().positive().optional(),
     commands: KeybaseCommandsConfigSchema,
+    execApprovals: KeybaseExecApprovalsConfigSchema,
     defaultTo: z.string().optional(),
     groupPolicy: GroupPolicySchema.optional(),
     groups: z.record(z.string(), KeybaseGroupConfigSchema).optional(),

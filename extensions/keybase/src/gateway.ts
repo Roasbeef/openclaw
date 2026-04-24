@@ -1,4 +1,5 @@
 import { isNormalizedSenderAllowed } from "openclaw/plugin-sdk/allow-from";
+import { CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY } from "openclaw/plugin-sdk/approval-handler-adapter-runtime";
 import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
 import { resolveAckReaction, shouldAckReaction } from "openclaw/plugin-sdk/channel-feedback";
@@ -10,6 +11,7 @@ import {
 } from "openclaw/plugin-sdk/channel-inbound";
 import { createAccountStatusSink } from "openclaw/plugin-sdk/channel-lifecycle";
 import { createChannelPairingChallengeIssuer } from "openclaw/plugin-sdk/channel-pairing";
+import { registerChannelRuntimeContext } from "openclaw/plugin-sdk/channel-runtime-context";
 import {
   hasControlCommand,
   resolveSenderCommandAuthorizationWithRuntime,
@@ -20,7 +22,14 @@ import { resolveInboundDirectDmAccessWithRuntime } from "openclaw/plugin-sdk/dir
 import { runStoppablePassiveMonitor } from "openclaw/plugin-sdk/extension-shared";
 import { resolveOpenProviderRuntimeGroupPolicy } from "openclaw/plugin-sdk/group-access";
 import { dispatchInboundReplyWithBase } from "openclaw/plugin-sdk/inbound-reply-dispatch";
+import { isKeybaseApprovalReactionAuthorizedSender } from "./approval-auth.js";
+import { resolveKeybaseApprovalReactionTargetKeys } from "./approval-native.js";
+import {
+  resolveKeybaseApprovalReactionTarget,
+  unregisterKeybaseApprovalReactionTarget,
+} from "./approval-reactions.js";
 import { startKeybaseApiListen } from "./client.js";
+import { isApprovalNotFoundError, resolveKeybaseApproval } from "./exec-approval-resolver.js";
 import {
   resolveKeybaseGroupAccess,
   resolveKeybaseGroupAllowFrom,
@@ -44,7 +53,7 @@ import {
   normalizeKeybaseGroupKey,
   normalizeKeybaseUsername,
 } from "./targets.js";
-import type { ResolvedKeybaseAccount } from "./types.js";
+import type { CoreConfig, ResolvedKeybaseAccount } from "./types.js";
 
 type KeybaseChannelRuntime = {
   commands: {
@@ -113,8 +122,10 @@ function buildConversationReplyTarget(conversationId: string): string {
 
 function maybeSendKeybaseAckReaction(params: {
   account: ResolvedKeybaseAccount;
+  commandAuthorized?: boolean;
   ctx: ChannelGatewayContext<ResolvedKeybaseAccount>;
   effectiveWasMentioned: boolean;
+  hasControlCommand?: boolean;
   isDirect: boolean;
   isGroup: boolean;
   isMentionableGroup: boolean;
@@ -125,6 +136,9 @@ function maybeSendKeybaseAckReaction(params: {
   canDetectMention?: boolean;
   shouldBypassMention?: boolean;
 }) {
+  if (params.hasControlCommand === true && params.commandAuthorized !== true) {
+    return;
+  }
   const emoji = resolveAckReaction(params.ctx.cfg, params.routeAgentId, {
     channel: "keybase",
     accountId: params.account.accountId,
@@ -344,6 +358,7 @@ async function handleDirectMessage(params: {
     messageId: String(message.id),
     timestamp: message.sentAtMs ?? (message.sentAt ? message.sentAt * 1000 : undefined),
     commandAuthorized: resolvedAccess.commandAuthorized,
+    originatingTo: replyTarget,
     extraContext: {
       BotUsername: params.account.username ?? undefined,
     },
@@ -401,6 +416,7 @@ async function handleGroupMessage(params: {
   }
 
   const rawBody = message.content.text?.body ?? "";
+  const replyTarget = buildConversationReplyTarget(message.conversationId);
   const groupId =
     normalizeKeybaseGroupKey(buildKeybaseInboundGroupId({ channel: message.channel }) ?? "") ??
     undefined;
@@ -539,7 +555,7 @@ async function handleGroupMessage(params: {
     CommandBody: commandBodyText,
     BodyForCommands: commandBodyText,
     From: `keybase:group:${groupId}`,
-    To: `keybase:${groupId}`,
+    To: replyTarget,
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
     ChatType: "group",
@@ -557,21 +573,23 @@ async function handleGroupMessage(params: {
     MessageSid: String(message.id),
     Timestamp: message.sentAtMs ?? (message.sentAt ? message.sentAt * 1000 : undefined),
     OriginatingChannel: "keybase",
-    OriginatingTo: `keybase:${groupId}`,
+    OriginatingTo: replyTarget,
     CommandAuthorized: commandAccess.commandAuthorized,
   });
 
   maybeSendKeybaseAckReaction({
     account: params.account,
+    commandAuthorized: commandAccess.commandAuthorized,
     ctx: params.ctx,
     effectiveWasMentioned: mentionDecision.effectiveWasMentioned,
+    hasControlCommand: hasControlCommandInMessage,
     isDirect: false,
     isGroup: true,
     isMentionableGroup: true,
     messageId: String(message.id),
     requireMention,
     routeAgentId: route.agentId,
-    target: buildConversationReplyTarget(message.conversationId),
+    target: replyTarget,
     canDetectMention: mentionState.canDetectMention,
     shouldBypassMention: mentionDecision.shouldBypassMention,
   });
@@ -604,7 +622,7 @@ async function handleGroupMessage(params: {
       }
       await sendKeybaseTextChunks({
         account: params.account,
-        to: buildConversationReplyTarget(message.conversationId),
+        to: replyTarget,
         text,
         replyToId: String(message.id),
       });
@@ -626,6 +644,90 @@ async function handleGroupMessage(params: {
   });
 }
 
+async function handleReactionMessage(params: {
+  account: ResolvedKeybaseAccount;
+  ctx: ChannelGatewayContext<ResolvedKeybaseAccount>;
+  event: Extract<KeybaseListenEvent, { type: "chat" }>;
+}) {
+  const message = params.event.message;
+  if (!message || message.content.type !== "reaction") {
+    return;
+  }
+
+  const senderId = normalizeKeybaseUsername(message.sender.username ?? "");
+  if (!senderId) {
+    return;
+  }
+  const accountUsername = normalizeKeybaseUsername(params.account.username ?? "");
+  if (accountUsername && senderId === accountUsername) {
+    return;
+  }
+
+  const reaction = message.content.reaction;
+  const reactionBody = reaction?.body?.trim() ?? "";
+  const targetMessageId = reaction?.messageId;
+  if (!reactionBody || targetMessageId === undefined) {
+    return;
+  }
+
+  const targetKeys = resolveKeybaseApprovalReactionTargetKeys({
+    conversationId: message.conversationId,
+    senderUsername: senderId,
+    channel: message.channel,
+  });
+  const target = resolveKeybaseApprovalReactionTarget({
+    accountId: params.account.accountId,
+    targetKeys,
+    messageId: targetMessageId,
+    reactionBody,
+  });
+  if (!target) {
+    return;
+  }
+
+  const approvalKind = target.approvalId.startsWith("plugin:") ? "plugin" : "exec";
+  if (
+    !isKeybaseApprovalReactionAuthorizedSender({
+      cfg: params.ctx.cfg as CoreConfig,
+      accountId: params.account.accountId,
+      senderId,
+      approvalKind,
+    })
+  ) {
+    params.ctx.log?.debug?.(
+      `[${params.account.accountId}] keybase approval reaction ignored for unauthorized sender=${senderId}`,
+    );
+    return;
+  }
+
+  try {
+    await resolveKeybaseApproval({
+      cfg: params.ctx.cfg,
+      approvalId: target.approvalId,
+      decision: target.decision,
+      senderId,
+    });
+    params.ctx.log?.debug?.(
+      `[${params.account.accountId}] keybase approval reaction resolved id=${target.approvalId} sender=${senderId} decision=${target.decision}`,
+    );
+  } catch (error) {
+    if (isApprovalNotFoundError(error)) {
+      unregisterKeybaseApprovalReactionTarget({
+        accountId: params.account.accountId,
+        targetKey: target.targetKey,
+        messageId: targetMessageId,
+      });
+      params.ctx.log?.debug?.(
+        `[${params.account.accountId}] keybase approval reaction ignored for expired id=${target.approvalId}`,
+      );
+      return;
+    }
+    params.ctx.log?.warn?.(
+      `[${params.account.accountId}] keybase approval reaction failed id=${target.approvalId}: ${String(error)}`,
+    );
+  }
+}
+
 async function handleKeybaseListenEvent(params: {
   account: ResolvedKeybaseAccount;
   ctx: ChannelGatewayContext<ResolvedKeybaseAccount>;
@@ -633,6 +735,14 @@ async function handleKeybaseListenEvent(params: {
   statusSink: ReturnType<typeof createAccountStatusSink>;
 }) {
   if (params.event.type !== "chat" || !params.event.message) {
+    return;
+  }
+  if (params.event.message.content.type === "reaction") {
+    await handleReactionMessage({
+      account: params.account,
+      ctx: params.ctx,
+      event: params.event,
+    });
     return;
   }
   if (params.event.message.content.type !== "text") {
@@ -671,6 +781,14 @@ export const keybaseGatewayAdapter: NonNullable<ChannelPlugin<ResolvedKeybaseAcc
       });
 
       await ensureKeybaseAccountPrepared(account);
+      registerChannelRuntimeContext({
+        channelRuntime: ctx.channelRuntime,
+        channelId: "keybase",
+        accountId: account.accountId,
+        capability: CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY,
+        context: {},
+        abortSignal: ctx.abortSignal,
+      });
       await syncKeybaseCommandAdvertisements({ account, cfg: ctx.cfg }).catch((error) => {
         ctx.log?.warn?.(
           `[${account.accountId}] keybase command advertisement sync failed: ${String(error)}`,

@@ -68,6 +68,7 @@ function resolveMergedKeybaseAccountConfig(
     channelConfig: cfg.channels?.keybase as KeybaseResolvedAccountConfig | undefined,
     accounts: cfg.channels?.keybase?.accounts,
     accountId,
+    nestedObjectKeys: ["execApprovals"],
     omitKeys: ["defaultAccount"],
     normalizeAccountId,
   });

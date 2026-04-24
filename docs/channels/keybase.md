@@ -65,6 +65,7 @@ Useful fields:
 | `pidFile`                   | Optional `keybased` pid file path            |
 | `binary`                    | Optional `keybase` binary path               |
 | `textChunkLimit`            | Optional outbound text chunk size            |
+| `execApprovals`             | Optional native approval delivery settings   |
 | `dmPolicy`                  | DM access policy (`pairing` recommended)     |
 | `allowFrom`                 | DM allowlist                                 |
 | `groupPolicy`               | Group route policy (`allowlist` recommended) |
@@ -157,16 +158,63 @@ Notes:
 
 ## Approvals
 
-Keybase uses the shared text-command approval fallback. When an exec or plugin
-approval prompt includes a command such as `/approve <id> allow-once`, send that
-command in the same authorized DM or tagged team chat. In team chats, tagging the
-bot also works, for example `@openclaw /approve <id> allow-once`; OpenClaw strips
-the bot mention before dispatching the shared `/approve` command.
+Keybase supports the shared text-command approval fallback. When an exec or
+plugin approval prompt includes a command such as `/approve <id> allow-once`,
+send that command in the same authorized DM or tagged team chat. In team chats,
+tagging the bot also works, for example `@openclaw /approve <id> allow-once`;
+OpenClaw strips the bot mention before dispatching the shared `/approve`
+command.
 
-Reaction-based approval shortcuts are not enabled for Keybase yet. The Keybase
-listener can parse reaction events, but approval reactions need a durable mapping
-from a bot-authored approval prompt to the approval id and decision before they
-are safe to treat as approvals.
+Keybase can also act as a native approval client when
+`channels.keybase.execApprovals` is configured. Native prompts can be sent to
+approver DMs, the originating Keybase chat, or both. OpenClaw binds reaction
+shortcuts only to the bot-authored approval prompt message, and only configured
+approvers can resolve them.
+
+```json5
+{
+  channels: {
+    keybase: {
+      execApprovals: {
+        enabled: true,
+        approvers: ["roasbeef"],
+        target: "dm", // "dm" | "channel" | "both"
+      },
+    },
+  },
+}
+```
+
+Reaction shortcuts:
+
+- `✅` or `:white_check_mark:` submits `allow-once`.
+- `♾️` or `:infinity:` submits `allow-always`.
+- `❌` or `:x:` submits `deny`.
+
+The text `/approve` path remains available as a fallback. If no Keybase
+approvers are configured, same-chat text approval behavior stays governed by the
+normal channel command authorization.
+
+## Subagents and async delivery
+
+Keybase supports the shared `/subagents` command surface. Since Keybase does not
+have Discord-style child threads, subagent completion updates route back to the
+same Keybase DM or team topic that launched the work. Keybase stores DMs as
+`conv:<conversation-id>` targets so detached completion delivery does not
+accidentally route back to the bot account itself.
+
+Useful commands:
+
+- `/subagents list`
+- `/subagents spawn <agentId> <task>`
+- `/subagents info <id|#>`
+- `/subagents log <id|#>`
+- `/subagents send <id|#> <message>`
+- `/subagents steer <id|#> <message>`
+- `/subagents kill <id|#|all>`
+
+Reply-to-subagent targeting is limited by Keybase's lack of durable per-subagent
+threads. Use `/subagents send` or `/subagents steer` for explicit targeting.
 
 ## Ack reactions
 
@@ -192,6 +240,9 @@ Notes:
 - `channels.keybase.ackReaction` overrides the global message ack reaction for Keybase.
 - Account-level overrides are available at `channels.keybase.accounts.<id>.ackReaction`.
 - The Unicode default eye reaction is normalized to the Keybase `:eyes:` shortcode.
+- Group control commands only receive the ack reaction after command
+  authorization succeeds. Unauthorized tagged commands stay quiet so the ack
+  remains a handled-work signal.
 - Reaction cleanup/removal is not enabled yet; this first pass leaves the ack reaction on the inbound message.
 
 ## Pairing flow
@@ -291,9 +342,11 @@ The QA lane reuses the same two-container scaffold and writes
 `keybase-blackbox-report.json` plus `keybase-blackbox-summary.md`. It currently
 covers team-channel canary replies, tagged help commands, native command
 advertisement discovery, chunked command delivery, DM canary replies, DM pairing
-challenges, mention gating, group allowlist block, restart resume, and ack
-reaction observation. The runner installs the requested `team#general` test route
-in the local smoke config before it starts assertions. Use repeated
+challenges, `/subagents list`, `/subagents spawn` with same-chat completion,
+mention gating, group allowlist block, restart resume, and ack reaction
+observation. The runner installs the requested
+`team#general` test route in the local smoke config before it starts assertions. Use repeated
 `--scenario <id>` flags to run a subset: `canary`, `help-command`,
 `command-advertisements`, `chunked-commands`, `dm-canary`, `dm-pairing`,
-`mention-gating`, `allowlist-block`, or `restart-resume`.
+`subagents-list`, `subagents-spawn`, `mention-gating`, `allowlist-block`, or
+`restart-resume`.
