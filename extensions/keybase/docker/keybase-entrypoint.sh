@@ -31,4 +31,5 @@ if [ "${OPENCLAW_CONFIGURE_GITHUB_TOKEN:-0}" = "1" ] && [ -n "${GITHUB_TOKEN:-}"
   fi
 fi
 
-exec node /app/extensions/keybase/docker/container-entrypoint.mjs "$@"
+container_entrypoint=${OPENCLAW_KEYBASE_CONTAINER_ENTRYPOINT:-/app/extensions/keybase/docker/container-entrypoint.mjs}
+exec node "$container_entrypoint" "$@"
