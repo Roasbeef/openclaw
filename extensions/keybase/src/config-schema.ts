@@ -6,6 +6,15 @@ import {
 } from "openclaw/plugin-sdk/channel-config-primitives";
 import { z } from "openclaw/plugin-sdk/zod";
 
+const KeybaseCommandsConfigSchema = z
+  .object({
+    alias: z.string().optional(),
+    native: z.union([z.boolean(), z.literal("auto")]).optional(),
+    nativeSkills: z.union([z.boolean(), z.literal("auto")]).optional(),
+  })
+  .strict()
+  .optional();
+
 export const KeybaseGroupConfigSchema = z
   .object({
     allowFrom: AllowFromListSchema,
@@ -31,6 +40,8 @@ export const KeybaseAccountConfigSchema = z
     pidFile: z.string().optional(),
     socketFile: z.string().optional(),
     enableTyping: z.boolean().optional(),
+    textChunkLimit: z.number().int().positive().optional(),
+    commands: KeybaseCommandsConfigSchema,
     defaultTo: z.string().optional(),
     groupPolicy: GroupPolicySchema.optional(),
     groups: z.record(z.string(), KeybaseGroupConfigSchema).optional(),

@@ -2,14 +2,29 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  listNativeCommandSpecsForConfig,
+  listProviderPluginCommandSpecs,
+  listSkillCommandsForAgents,
+  type NativeCommandSpec,
+} from "openclaw/plugin-sdk/command-auth";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
+import {
+  resolveNativeCommandsEnabled,
+  resolveNativeSkillsEnabled,
+} from "openclaw/plugin-sdk/config-runtime";
+import { chunkTextForOutbound } from "openclaw/plugin-sdk/text-chunking";
+import {
   keybaseApiRequest,
   keybaseConfigureNotificationSettings,
   keybaseOneshot,
 } from "./client.js";
 import {
   buildKeybaseAttachRequest,
+  buildKeybaseAdvertiseCommandsRequest,
+  buildKeybaseClearCommandsRequest,
   buildKeybaseReactionRequest,
   buildKeybaseSendRequest,
+  type KeybaseCommandDefinition,
 } from "./protocol.js";
 import { resolveKeybaseConversationRef } from "./targets.js";
 import type { ResolvedKeybaseAccount } from "./types.js";
@@ -22,15 +37,27 @@ type SendResultPayload = {
 type RuntimeDeps = {
   apiRequest: typeof keybaseApiRequest;
   configureNotificationSettings: typeof keybaseConfigureNotificationSettings;
+  chunkTextForOutbound: typeof chunkTextForOutbound;
+  listNativeCommandSpecsForConfig: typeof listNativeCommandSpecsForConfig;
+  listProviderPluginCommandSpecs: typeof listProviderPluginCommandSpecs;
+  listSkillCommandsForAgents: typeof listSkillCommandsForAgents;
   oneshot: typeof keybaseOneshot;
   readFile: typeof readFile;
+  resolveNativeCommandsEnabled: typeof resolveNativeCommandsEnabled;
+  resolveNativeSkillsEnabled: typeof resolveNativeSkillsEnabled;
 };
 
 const defaultRuntimeDeps: RuntimeDeps = {
   apiRequest: keybaseApiRequest,
+  chunkTextForOutbound,
   configureNotificationSettings: keybaseConfigureNotificationSettings,
+  listNativeCommandSpecsForConfig,
+  listProviderPluginCommandSpecs,
+  listSkillCommandsForAgents,
   oneshot: keybaseOneshot,
   readFile,
+  resolveNativeCommandsEnabled,
+  resolveNativeSkillsEnabled,
 };
 
 const preparedAccounts = new Map<string, Promise<void>>();
@@ -85,6 +112,68 @@ const KEYBASE_REACTION_SHORTCODES = new Map<string, string>([
   ["\u{1f440}", ":eyes:"],
   ["\u{2705}", ":white_check_mark:"],
 ]);
+const DEFAULT_KEYBASE_TEXT_CHUNK_LIMIT = 4000;
+
+type KeybaseCommandSpec = Pick<NativeCommandSpec, "acceptsArgs" | "description" | "name">;
+
+function normalizeKeybaseAdvertisedCommandName(name: string): string {
+  const trimmed = name.trim().replace(/^\/+/, "");
+  return trimmed ? `/${trimmed}` : "";
+}
+
+function buildKeybaseCommandUsage(command: KeybaseCommandSpec): string | undefined {
+  if (!command.acceptsArgs) {
+    return undefined;
+  }
+  const args = "args" in command ? (command as NativeCommandSpec).args : undefined;
+  if (!args?.length) {
+    return "[args]";
+  }
+  const rendered = args.map((arg) => {
+    const name = arg.captureRemaining ? `${arg.name}...` : arg.name;
+    return arg.required ? `<${name}>` : `[${name}]`;
+  });
+  return rendered.join(" ");
+}
+
+function buildKeybaseCommandDefinitions(
+  commands: readonly KeybaseCommandSpec[],
+): KeybaseCommandDefinition[] {
+  const seen = new Set<string>();
+  const definitions: KeybaseCommandDefinition[] = [];
+  for (const command of commands) {
+    const name = normalizeKeybaseAdvertisedCommandName(command.name);
+    const dedupeKey = name.toLowerCase();
+    if (!name || seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+    definitions.push({
+      name,
+      description: command.description,
+      ...(buildKeybaseCommandUsage(command) ? { usage: buildKeybaseCommandUsage(command) } : {}),
+    });
+  }
+  return definitions;
+}
+
+function resolveKeybaseCommandAlias(account: ResolvedKeybaseAccount): string {
+  return account.config.commands?.alias?.trim() || account.name?.trim() || "OpenClaw";
+}
+
+export function resolveKeybaseTextChunkLimit(account: ResolvedKeybaseAccount): number {
+  return account.textChunkLimit ?? DEFAULT_KEYBASE_TEXT_CHUNK_LIMIT;
+}
+
+function resolveKeybaseTextChunks(params: {
+  account: ResolvedKeybaseAccount;
+  deps: RuntimeDeps;
+  text: string;
+}): string[] {
+  const limit = resolveKeybaseTextChunkLimit(params.account);
+  const chunks = params.deps.chunkTextForOutbound(params.text, limit).filter((chunk) => chunk);
+  return chunks.length > 0 ? chunks : params.text ? [params.text] : [];
+}
 
 export function normalizeKeybaseReactionBody(reaction: string): string {
   const trimmed = reaction.trim();
@@ -143,6 +232,59 @@ export async function ensureKeybaseAccountPrepared(
   }
 }
 
+export async function syncKeybaseCommandAdvertisements(params: {
+  account: ResolvedKeybaseAccount;
+  cfg: OpenClawConfig;
+  deps?: Partial<RuntimeDeps>;
+}): Promise<{ advertised: number; cleared: boolean }> {
+  const runtimeDeps = { ...defaultRuntimeDeps, ...params.deps };
+  await ensureKeybaseAccountPrepared(params.account, runtimeDeps);
+
+  const nativeEnabled = runtimeDeps.resolveNativeCommandsEnabled({
+    providerId: "keybase",
+    providerSetting: params.account.config.commands?.native,
+    globalSetting: params.cfg.commands?.native,
+  });
+  const cliOptions = resolveCliOptions(params.account);
+  if (!nativeEnabled) {
+    await runtimeDeps.apiRequest(buildKeybaseClearCommandsRequest(), cliOptions);
+    return { advertised: 0, cleared: true };
+  }
+
+  const nativeSkillsEnabled = runtimeDeps.resolveNativeSkillsEnabled({
+    providerId: "keybase",
+    providerSetting: params.account.config.commands?.nativeSkills,
+    globalSetting: params.cfg.commands?.nativeSkills,
+  });
+  const skillCommands = nativeSkillsEnabled
+    ? runtimeDeps.listSkillCommandsForAgents({ cfg: params.cfg })
+    : [];
+  const nativeCommands = runtimeDeps.listNativeCommandSpecsForConfig(params.cfg, {
+    skillCommands,
+    provider: "keybase",
+  });
+  const pluginCommands = runtimeDeps.listProviderPluginCommandSpecs("keybase");
+  const commands = buildKeybaseCommandDefinitions([...nativeCommands, ...pluginCommands]);
+  if (commands.length === 0) {
+    await runtimeDeps.apiRequest(buildKeybaseClearCommandsRequest(), cliOptions);
+    return { advertised: 0, cleared: true };
+  }
+
+  await runtimeDeps.apiRequest(
+    buildKeybaseAdvertiseCommandsRequest({
+      alias: resolveKeybaseCommandAlias(params.account),
+      advertisements: [
+        {
+          type: "public",
+          commands,
+        },
+      ],
+    }),
+    cliOptions,
+  );
+  return { advertised: commands.length, cleared: false };
+}
+
 export async function sendKeybaseText(params: {
   account: ResolvedKeybaseAccount;
   replyToId?: string | null;
@@ -169,6 +311,33 @@ export async function sendKeybaseText(params: {
   return {
     messageId: normalizeMessageId(result.id ?? result.outbox_id),
   };
+}
+
+export async function sendKeybaseTextChunks(params: {
+  account: ResolvedKeybaseAccount;
+  replyToId?: string | null;
+  text: string;
+  to: string;
+  deps?: Partial<RuntimeDeps>;
+}): Promise<{ messageId: string; sent: number }> {
+  const runtimeDeps = { ...defaultRuntimeDeps, ...params.deps };
+  const chunks = resolveKeybaseTextChunks({
+    account: params.account,
+    deps: runtimeDeps,
+    text: params.text,
+  });
+  let messageId = "";
+  let sent = 0;
+  for (const chunk of chunks) {
+    const result = await sendKeybaseText({
+      ...params,
+      text: chunk,
+      deps: runtimeDeps,
+    });
+    messageId = result.messageId || messageId;
+    sent += 1;
+  }
+  return { messageId, sent };
 }
 
 export async function sendKeybaseReaction(params: {

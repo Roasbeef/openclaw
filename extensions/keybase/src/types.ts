@@ -40,5 +40,6 @@ export interface ResolvedKeybaseAccount {
   paperKeyFile?: string;
   pidFile?: string;
   socketFile?: string;
+  textChunkLimit?: number;
   username?: string;
 }

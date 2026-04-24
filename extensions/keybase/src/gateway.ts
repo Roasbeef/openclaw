@@ -30,7 +30,14 @@ import {
   resolveKeybaseGroupSystemPrompt,
 } from "./groups.js";
 import type { KeybaseListenEvent } from "./listen.js";
-import { ensureKeybaseAccountPrepared, sendKeybaseReaction, sendKeybaseText } from "./runtime.js";
+import { stripKeybaseBotMention } from "./mentions.js";
+import {
+  ensureKeybaseAccountPrepared,
+  sendKeybaseReaction,
+  sendKeybaseText,
+  sendKeybaseTextChunks,
+  syncKeybaseCommandAdvertisements,
+} from "./runtime.js";
 import {
   buildKeybaseInboundGroupId,
   inferKeybaseInboundChatType,
@@ -226,6 +233,7 @@ async function handleDirectMessage(params: {
   }
 
   const rawBody = message.content.text?.body ?? "";
+  const commandBody = stripKeybaseBotMention(rawBody, params.account.username ?? undefined);
   const replyTarget = buildConversationReplyTarget(message.conversationId);
   const channelRuntime = resolveKeybaseChannelRuntime(params.ctx);
   const issuePairingChallenge = createChannelPairingChallengeIssuer({
@@ -332,9 +340,13 @@ async function handleDirectMessage(params: {
     recipientAddress: params.account.username ? `keybase:${params.account.username}` : replyTarget,
     conversationLabel: senderId,
     rawBody,
+    commandBody,
     messageId: String(message.id),
     timestamp: message.sentAtMs ?? (message.sentAt ? message.sentAt * 1000 : undefined),
     commandAuthorized: resolvedAccess.commandAuthorized,
+    extraContext: {
+      BotUsername: params.account.username ?? undefined,
+    },
     deliver: async (payload) => {
       const text =
         payload && typeof payload === "object" && "text" in payload
@@ -343,7 +355,7 @@ async function handleDirectMessage(params: {
       if (!text.trim()) {
         return;
       }
-      await sendKeybaseText({
+      await sendKeybaseTextChunks({
         account: params.account,
         to: replyTarget,
         text,
@@ -434,13 +446,16 @@ async function handleGroupMessage(params: {
   }
 
   const channelRuntime = resolveKeybaseChannelRuntime(params.ctx);
+  const botUsername = params.account.username ?? message.botUsername ?? undefined;
+  const commandCheckText = stripKeybaseBotMention(rawBody, botUsername);
   const allowTextCommands = shouldHandleTextCommands({
     cfg: params.ctx.cfg,
     surface: "keybase",
   });
-  const hasControlCommandInMessage = hasControlCommand(rawBody, params.ctx.cfg, {
-    botUsername: message.botUsername,
+  const hasControlCommandInMessage = hasControlCommand(commandCheckText, params.ctx.cfg, {
+    botUsername,
   });
+  const commandBodyText = hasControlCommandInMessage ? commandCheckText : rawBody;
   const commandAccess = await resolveSenderCommandAuthorizationWithRuntime({
     cfg: params.ctx.cfg,
     rawBody,
@@ -521,7 +536,8 @@ async function handleGroupMessage(params: {
   const ctxPayload = channelRuntime.reply.finalizeInboundContext({
     Body: body,
     RawBody: rawBody,
-    CommandBody: rawBody,
+    CommandBody: commandBodyText,
+    BodyForCommands: commandBodyText,
     From: `keybase:group:${groupId}`,
     To: `keybase:${groupId}`,
     SessionKey: route.sessionKey,
@@ -530,6 +546,7 @@ async function handleGroupMessage(params: {
     ConversationLabel: groupLabel,
     SenderName: message.sender.username ?? undefined,
     SenderId: senderId,
+    BotUsername: botUsername,
     GroupSubject: groupLabel,
     GroupChannel: message.channel.topicName ?? undefined,
     GroupSpace: message.channel.name,
@@ -585,7 +602,7 @@ async function handleGroupMessage(params: {
       if (!text.trim()) {
         return;
       }
-      await sendKeybaseText({
+      await sendKeybaseTextChunks({
         account: params.account,
         to: buildConversationReplyTarget(message.conversationId),
         text,
@@ -654,6 +671,11 @@ export const keybaseGatewayAdapter: NonNullable<ChannelPlugin<ResolvedKeybaseAcc
       });
 
       await ensureKeybaseAccountPrepared(account);
+      await syncKeybaseCommandAdvertisements({ account, cfg: ctx.cfg }).catch((error) => {
+        ctx.log?.warn?.(
+          `[${account.accountId}] keybase command advertisement sync failed: ${String(error)}`,
+        );
+      });
 
       await runStoppablePassiveMonitor({
         abortSignal: ctx.abortSignal,

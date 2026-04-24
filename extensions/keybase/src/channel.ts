@@ -20,6 +20,7 @@ import {
   createDefaultChannelRuntimeState,
   collectStatusIssuesFromLastError,
 } from "openclaw/plugin-sdk/status-helpers";
+import { chunkTextForOutbound } from "openclaw/plugin-sdk/text-chunking";
 import {
   DEFAULT_ACCOUNT_ID,
   listKeybaseAccountIds,
@@ -29,7 +30,13 @@ import {
 import { KeybaseChannelConfigSchema } from "./config-schema.js";
 import { keybaseGatewayAdapter } from "./gateway.js";
 import { resolveKeybaseGroupMatch, resolveKeybaseGroupRequireMention } from "./groups.js";
-import { sendKeybaseMedia, sendKeybaseText } from "./runtime.js";
+import { stripKeybaseBotMention } from "./mentions.js";
+import {
+  resolveKeybaseTextChunkLimit,
+  sendKeybaseMedia,
+  sendKeybaseText,
+  sendKeybaseTextChunks,
+} from "./runtime.js";
 import { applyKeybaseSetup } from "./setup.js";
 import {
   buildKeybaseDmTarget,
@@ -55,11 +62,6 @@ const meta = {
   order: 73,
   systemImage: "key.horizontal",
   markdownCapable: true,
-  exposure: {
-    configured: false,
-    setup: false,
-    docs: false,
-  },
 } as const;
 
 const keybaseConfigAdapter = createScopedChannelConfigAdapter<
@@ -161,6 +163,11 @@ export const keybasePlugin = createChatChannelPlugin({
     capabilities: {
       chatTypes: ["direct", "group"],
       media: true,
+      nativeCommands: true,
+    },
+    commands: {
+      nativeCommandsAutoEnabled: true,
+      nativeSkillsAutoEnabled: true,
     },
     reload: { configPrefixes: ["channels.keybase"] },
     configSchema: KeybaseChannelConfigSchema,
@@ -205,6 +212,9 @@ export const keybasePlugin = createChatChannelPlugin({
         });
         return resolveKeybaseGroupRequireMention(groupMatch);
       },
+    },
+    mentions: {
+      stripMentions: ({ text, ctx }) => stripKeybaseBotMention(text, ctx.BotUsername),
     },
     directory: {
       self: async ({ cfg, accountId }) => {
@@ -297,11 +307,16 @@ export const keybasePlugin = createChatChannelPlugin({
   outbound: {
     base: {
       deliveryMode: "direct",
+      chunker: chunkTextForOutbound,
+      chunkerMode: "markdown",
+      textChunkLimit: 4000,
+      resolveEffectiveTextChunkLimit: ({ cfg, accountId }) =>
+        resolveKeybaseTextChunkLimit(resolveKeybaseAccount({ cfg: cfg as CoreConfig, accountId })),
     },
     attachedResults: {
       channel: CHANNEL_ID,
       sendText: async ({ cfg, to, text, accountId, replyToId }) =>
-        await sendKeybaseText({
+        await sendKeybaseTextChunks({
           account: resolveKeybaseAccount({ cfg: cfg as CoreConfig, accountId }),
           to,
           text,

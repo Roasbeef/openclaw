@@ -316,6 +316,10 @@ export function buildKeybaseListCommandsRequest(params: KeybaseConversationRef):
   return buildRequest("listcommands", serializeConversationRef(params));
 }
 
+export function buildKeybaseClearCommandsRequest(): KeybaseApiRequest {
+  return buildRequest("clearcommands");
+}
+
 export function buildKeybaseAdvertiseCommandsRequest(params: {
   advertisements: readonly KeybaseCommandAdvertisement[];
   alias?: string;

@@ -124,6 +124,7 @@ export function resolveKeybaseAccount(params: {
     ...(normalizeOptionalString(merged.socketFile)
       ? { socketFile: normalizeOptionalString(merged.socketFile) }
       : {}),
+    ...(merged.textChunkLimit ? { textChunkLimit: merged.textChunkLimit } : {}),
     ...(normalizeOptionalString(merged.username)
       ? { username: normalizeOptionalString(merged.username) }
       : {}),

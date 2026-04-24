@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   ensureKeybaseAccountPrepared: vi.fn(async () => {}),
   sendKeybaseReaction: vi.fn(async () => ({ messageId: "reaction-1" })),
   sendKeybaseText: vi.fn(async () => ({ messageId: "sent-1" })),
+  sendKeybaseTextChunks: vi.fn(async () => ({ messageId: "sent-1", sent: 1 })),
+  syncKeybaseCommandAdvertisements: vi.fn(async () => ({ advertised: 1, cleared: false })),
 }));
 
 vi.mock("./client.js", async () => {
@@ -25,6 +27,8 @@ vi.mock("./runtime.js", async () => {
     ensureKeybaseAccountPrepared: mocks.ensureKeybaseAccountPrepared,
     sendKeybaseReaction: mocks.sendKeybaseReaction,
     sendKeybaseText: mocks.sendKeybaseText,
+    sendKeybaseTextChunks: mocks.sendKeybaseTextChunks,
+    syncKeybaseCommandAdvertisements: mocks.syncKeybaseCommandAdvertisements,
   };
 });
 
@@ -132,6 +136,8 @@ describe("keybaseGatewayAdapter.startAccount", () => {
     mocks.ensureKeybaseAccountPrepared.mockClear();
     mocks.sendKeybaseReaction.mockClear();
     mocks.sendKeybaseText.mockClear();
+    mocks.sendKeybaseTextChunks.mockClear();
+    mocks.syncKeybaseCommandAdvertisements.mockClear();
   });
 
   it("issues a pairing challenge for unknown DM senders", async () => {
@@ -211,7 +217,7 @@ describe("keybaseGatewayAdapter.startAccount", () => {
     await vi.waitFor(() => {
       expect(harness.recordInboundSession).toHaveBeenCalledTimes(1);
       expect(harness.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
-      expect(mocks.sendKeybaseText).toHaveBeenCalledWith(
+      expect(mocks.sendKeybaseTextChunks).toHaveBeenCalledWith(
         expect.objectContaining({
           to: "conv:conv-2",
           text: "reply from agent",
@@ -360,7 +366,7 @@ describe("keybaseGatewayAdapter.startAccount", () => {
     await vi.waitFor(() => {
       expect(harness.recordInboundSession).toHaveBeenCalledTimes(1);
       expect(harness.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
-      expect(mocks.sendKeybaseText).toHaveBeenCalledWith(
+      expect(mocks.sendKeybaseTextChunks).toHaveBeenCalledWith(
         expect.objectContaining({
           to: "conv:conv-team-1",
           text: "reply from agent",
@@ -380,11 +386,72 @@ describe("keybaseGatewayAdapter.startAccount", () => {
       | { ctx?: Record<string, unknown>; replyOptions?: Record<string, unknown> }
       | undefined;
     expect(dispatchCall?.ctx?.ChatType).toBe("group");
+    expect(dispatchCall?.ctx?.BotUsername).toBe("openclaw");
     expect(dispatchCall?.ctx?.WasMentioned).toBe(true);
     expect(dispatchCall?.ctx?.GroupSystemPrompt).toBe("Stay focused on infra tasks.");
     expect(dispatchCall?.replyOptions).toMatchObject({
       skillFilter: ["infra"],
     });
+
+    abort.abort();
+    await task;
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("strips the bot mention from tagged group command bodies", async () => {
+    const stop = vi.fn();
+    mocks.startKeybaseApiListen.mockReturnValue({
+      child: {} as never,
+      stop,
+    });
+    const harness = createRuntimeHarness();
+    const abort = new AbortController();
+    const ctx = createStartAccountContext({
+      account: buildAccount({
+        groupPolicy: "allowlist",
+        groups: {
+          "team:lightninglabs#lbottest": {
+            allowFrom: [],
+            requireMention: true,
+          },
+        },
+      }),
+      abortSignal: abort.signal,
+      cfg: {
+        messages: { ackReaction: "", ackReactionScope: "none" },
+        commands: { useAccessGroups: true },
+      } as never,
+    });
+    Object.assign(ctx, { channelRuntime: harness.channelRuntime });
+
+    const task = keybaseGatewayAdapter.startAccount!(ctx);
+
+    await vi.waitFor(() => expect(mocks.startKeybaseApiListen).toHaveBeenCalledOnce());
+    const args = mocks.startKeybaseApiListen.mock.calls[0]?.[0] as {
+      onEvent: (event: KeybaseListenEvent) => void;
+    };
+    args.onEvent(
+      buildTextEvent({
+        body: "@openclaw /help",
+        conversationId: "conv-team-command",
+        id: 100,
+        teamName: "lightninglabs",
+        topicName: "lbottest",
+        atMentionUsernames: ["openclaw"],
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(harness.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+    });
+
+    const dispatchCall = harness.dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0] as
+      | { ctx?: Record<string, unknown> }
+      | undefined;
+    expect(dispatchCall?.ctx?.RawBody).toBe("@openclaw /help");
+    expect(dispatchCall?.ctx?.CommandBody).toBe("/help");
+    expect(dispatchCall?.ctx?.BodyForCommands).toBe("/help");
+    expect(dispatchCall?.ctx?.BotUsername).toBe("openclaw");
 
     abort.abort();
     await task;

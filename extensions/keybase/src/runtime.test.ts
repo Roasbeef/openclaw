@@ -1,10 +1,14 @@
+import type { NativeCommandSpec } from "openclaw/plugin-sdk/command-auth";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   normalizeKeybaseReactionBody,
+  resolveKeybaseTextChunkLimit,
   resetKeybasePreparedAccountCache,
   sendKeybaseMedia,
   sendKeybaseReaction,
   sendKeybaseText,
+  sendKeybaseTextChunks,
+  syncKeybaseCommandAdvertisements,
 } from "./runtime.js";
 import type { ResolvedKeybaseAccount } from "./types.js";
 
@@ -83,6 +87,42 @@ describe("Keybase runtime helpers", () => {
     expect(normalizeKeybaseReactionBody(":hourglass_flowing_sand:")).toBe(
       ":hourglass_flowing_sand:",
     );
+  });
+
+  it("chunks long text replies before sending through the JSON API", async () => {
+    const apiRequest = vi
+      .fn()
+      .mockResolvedValueOnce({ id: 101 })
+      .mockResolvedValueOnce({ id: 102 });
+
+    const result = await sendKeybaseTextChunks({
+      account: {
+        ...account,
+        textChunkLimit: 5,
+      },
+      to: "team:lightninglabs#ops",
+      text: "alpha beta",
+      replyToId: "41",
+      deps: {
+        apiRequest,
+        chunkTextForOutbound: vi.fn(() => ["alpha", "beta"]),
+        configureNotificationSettings: vi.fn().mockResolvedValue(undefined),
+        oneshot: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    expect(result).toEqual({ messageId: "102", sent: 2 });
+    expect(apiRequest).toHaveBeenCalledTimes(2);
+    expect(apiRequest.mock.calls.map((call) => call[0].params.options.message.body)).toEqual([
+      "alpha",
+      "beta",
+    ]);
+    expect(apiRequest.mock.calls.map((call) => call[0].params.options.reply_to)).toEqual([41, 41]);
+  });
+
+  it("uses the default Keybase chunk limit unless the account overrides it", () => {
+    expect(resolveKeybaseTextChunkLimit(account)).toBe(4000);
+    expect(resolveKeybaseTextChunkLimit({ ...account, textChunkLimit: 1234 })).toBe(1234);
   });
 
   it("sends reactions through the Keybase reaction API", async () => {
@@ -175,6 +215,141 @@ describe("Keybase runtime helpers", () => {
           }),
         },
       }),
+      expect.any(Object),
+    );
+  });
+
+  it("advertises OpenClaw slash commands through the Keybase command menu", async () => {
+    const apiRequest = vi.fn().mockResolvedValue({});
+
+    const result = await syncKeybaseCommandAdvertisements({
+      account: {
+        ...account,
+        name: "Infra Claw",
+        config: {
+          commands: {
+            alias: "infra-claw",
+            native: true,
+            nativeSkills: false,
+          },
+        },
+      },
+      cfg: {
+        commands: {
+          native: true,
+          nativeSkills: false,
+        },
+      } as never,
+      deps: {
+        apiRequest,
+        configureNotificationSettings: vi.fn().mockResolvedValue(undefined),
+        listNativeCommandSpecsForConfig: vi.fn(
+          () =>
+            [
+              {
+                name: "status",
+                description: "Show current status.",
+                acceptsArgs: false,
+              },
+              {
+                name: "model",
+                description: "Show or set the model.",
+                acceptsArgs: true,
+                args: [
+                  {
+                    name: "name",
+                    description: "Model name",
+                    type: "string",
+                    required: false,
+                  },
+                ],
+              },
+            ] satisfies NativeCommandSpec[],
+        ),
+        listProviderPluginCommandSpecs: vi.fn(() => [
+          {
+            name: "status",
+            description: "Duplicate should be ignored.",
+            acceptsArgs: false,
+          },
+          {
+            name: "deploy",
+            description: "Run deploy workflow.",
+            acceptsArgs: true,
+          },
+        ]),
+        listSkillCommandsForAgents: vi.fn(() => []),
+        oneshot: vi.fn().mockResolvedValue(undefined),
+        resolveNativeCommandsEnabled: vi.fn(() => true),
+        resolveNativeSkillsEnabled: vi.fn(() => false),
+      },
+    });
+
+    expect(result).toEqual({ advertised: 3, cleared: false });
+    expect(apiRequest).toHaveBeenLastCalledWith(
+      {
+        method: "advertisecommands",
+        params: {
+          options: {
+            alias: "infra-claw",
+            advertisements: [
+              {
+                type: "public",
+                commands: [
+                  {
+                    name: "/status",
+                    description: "Show current status.",
+                  },
+                  {
+                    name: "/model",
+                    description: "Show or set the model.",
+                    usage: "[name]",
+                  },
+                  {
+                    name: "/deploy",
+                    description: "Run deploy workflow.",
+                    usage: "[args]",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      expect.any(Object),
+    );
+  });
+
+  it("clears Keybase command advertisements when native commands are disabled", async () => {
+    const apiRequest = vi.fn().mockResolvedValue({});
+
+    const result = await syncKeybaseCommandAdvertisements({
+      account: {
+        ...account,
+        config: {
+          commands: {
+            native: false,
+          },
+        },
+      },
+      cfg: {} as never,
+      deps: {
+        apiRequest,
+        configureNotificationSettings: vi.fn().mockResolvedValue(undefined),
+        listNativeCommandSpecsForConfig: vi.fn(() => []),
+        listProviderPluginCommandSpecs: vi.fn(() => []),
+        listSkillCommandsForAgents: vi.fn(() => []),
+        oneshot: vi.fn().mockResolvedValue(undefined),
+        resolveNativeCommandsEnabled: vi.fn(() => false),
+        resolveNativeSkillsEnabled: vi.fn(() => false),
+      },
+    });
+
+    expect(result).toEqual({ advertised: 0, cleared: true });
+    expect(apiRequest).toHaveBeenLastCalledWith(
+      {
+        method: "clearcommands",
+      },
       expect.any(Object),
     );
   });

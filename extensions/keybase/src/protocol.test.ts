@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildKeybaseAdvertiseCommandsRequest,
+  buildKeybaseClearCommandsRequest,
   buildKeybaseDirectChannel,
   buildKeybaseSendRequest,
   buildKeybaseTeamChannel,
@@ -79,6 +80,12 @@ describe("Keybase protocol builders", () => {
           ],
         },
       },
+    });
+  });
+
+  it("builds clear command advertisements requests", () => {
+    expect(buildKeybaseClearCommandsRequest()).toEqual({
+      method: "clearcommands",
     });
   });
 });
