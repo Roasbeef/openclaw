@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const DEFAULT_KEYBASE_BINARY = "keybase";
@@ -150,13 +150,21 @@ function buildKeybaseBaseArgs(resolved) {
   return args;
 }
 
+function buildKeybaseCommandEnv(resolved) {
+  return {
+    ...process.env,
+    KEYBASE_SERVICE: normalizeOptionalString(process.env.KEYBASE_SERVICE) ?? "1",
+    TMPDIR: normalizeOptionalString(process.env.TMPDIR) ?? resolved.tmpDir,
+  };
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function waitForKeybaseSocket(resolved, getEarlyExitError) {
   const socketPath = resolved.socketFile;
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + 60_000;
   let lastError;
   while (Date.now() < deadline) {
     const earlyExitError = getEarlyExitError();
@@ -168,7 +176,7 @@ async function waitForKeybaseSocket(resolved, getEarlyExitError) {
       return;
     } catch (error) {
       lastError = error;
-      await sleep(100);
+      await sleep(250);
     }
   }
   throw new Error(`Keybase service socket did not appear at ${socketPath}: ${String(lastError)}`);
@@ -200,12 +208,47 @@ async function runKeybaseCommand(command, args, env) {
   });
 }
 
-async function startKeybaseService(resolved, paperKey) {
-  const env = {
-    ...process.env,
-    KEYBASE_SERVICE: normalizeOptionalString(process.env.KEYBASE_SERVICE) ?? "1",
-    TMPDIR: normalizeOptionalString(process.env.TMPDIR) ?? resolved.tmpDir,
-  };
+function isKeybaseServerAlreadyRunningError(stderr) {
+  return (
+    stderr.includes("server already running") ||
+    stderr.includes("error locking") ||
+    stderr.includes("resource temporarily unavailable")
+  );
+}
+
+function isKeybaseLoginRequiredError(error) {
+  return String(error).includes("Login required");
+}
+
+async function stopExistingKeybaseService(resolved) {
+  try {
+    const rawPid = await readFile(resolved.pidFile, "utf8");
+    const pid = Number.parseInt(rawPid.trim(), 10);
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        process.kill(pid, "TERM");
+        await sleep(1000);
+      } catch {
+        // The process may already be gone; stale pid files are cleaned below.
+      }
+      try {
+        process.kill(pid, 0);
+        process.kill(pid, "KILL");
+      } catch {
+        // Process exited after TERM or the pid file was stale.
+      }
+    }
+  } catch {
+    // No pid file is fine; remove any stale socket/pid paths below.
+  }
+  await Promise.all([
+    rm(resolved.socketFile, { force: true }),
+    rm(resolved.pidFile, { force: true }),
+  ]);
+}
+
+async function startKeybaseService(resolved, paperKey, attempt = 0) {
+  const env = buildKeybaseCommandEnv(resolved);
   const args = [
     ...buildKeybaseBaseArgs(resolved),
     "service",
@@ -224,19 +267,35 @@ async function startKeybaseService(resolved, paperKey) {
   let stderr = "";
   let ready = false;
   let earlyExitError;
+  let earlyExitAlreadyRunning = false;
   child.stderr?.setEncoding("utf8");
   child.stderr?.on("data", (chunk) => {
     stderr += chunk.toString();
   });
   child.once("exit", (code, signal) => {
     if (!ready) {
+      if (isKeybaseServerAlreadyRunningError(stderr)) {
+        earlyExitAlreadyRunning = true;
+        return;
+      }
       const reason = signal ? `signal ${signal}` : `status ${code}`;
       earlyExitError = new Error(`Keybase service exited before readiness (${reason}): ${stderr}`);
     }
   });
   child.stdin.end(`${paperKey.trim()}\n`);
 
-  await waitForKeybaseSocket(resolved, () => earlyExitError);
+  try {
+    await waitForKeybaseSocket(resolved, () => earlyExitError);
+  } catch (error) {
+    if (attempt < 4) {
+      if (!child.killed) {
+        child.kill();
+      }
+      await stopExistingKeybaseService(resolved);
+      return await startKeybaseService(resolved, paperKey, attempt + 1);
+    }
+    throw error;
+  }
 
   const deadline = Date.now() + 30_000;
   let lastError;
@@ -269,7 +328,25 @@ async function startKeybaseService(resolved, paperKey) {
   if (!child.killed) {
     child.kill();
   }
+  if (attempt < 4 && (earlyExitAlreadyRunning || isKeybaseLoginRequiredError(lastError))) {
+    await stopExistingKeybaseService(resolved);
+    return await startKeybaseService(resolved, paperKey, attempt + 1);
+  }
   throw new Error(`Keybase service did not become ready: ${String(lastError)}`);
+}
+
+async function isExistingKeybaseServiceReady(resolved) {
+  try {
+    await stat(resolved.socketFile);
+    await runKeybaseCommand(
+      resolved.binary,
+      [...buildKeybaseBaseArgs(resolved), "whoami"],
+      buildKeybaseCommandEnv(resolved),
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function prepareKeybaseContainer(resolved) {
@@ -290,8 +367,94 @@ async function prepareKeybaseContainer(resolved) {
   if (!resolved.autoOneshot || !resolved.username || !paperKey) {
     return;
   }
+  if (await isExistingKeybaseServiceReady(resolved)) {
+    return;
+  }
 
+  await stopExistingKeybaseService(resolved);
   await startKeybaseService(resolved, paperKey);
+}
+
+function childExitCode(code, signal) {
+  if (signal) {
+    return 1;
+  }
+  return typeof code === "number" ? code : 1;
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function terminateChild(child, signal) {
+  if (!child.killed) {
+    child.kill(signal);
+  }
+}
+
+async function waitForManagedChild(child) {
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let shutdownTimer;
+    const finish = (exitCode) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearInterval(livenessTimer);
+      if (shutdownTimer) {
+        clearTimeout(shutdownTimer);
+      }
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      resolve(exitCode);
+    };
+    const handleExit = (code, signal) => {
+      finish(childExitCode(code, signal));
+    };
+    const handleError = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearInterval(livenessTimer);
+      if (shutdownTimer) {
+        clearTimeout(shutdownTimer);
+      }
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      reject(error);
+    };
+    const forwardSignal = (signal) => {
+      terminateChild(child, signal);
+      shutdownTimer = setTimeout(() => {
+        terminateChild(child, "SIGKILL");
+        finish(1);
+      }, 15_000);
+    };
+    const onSigint = () => forwardSignal("SIGINT");
+    const onSigterm = () => forwardSignal("SIGTERM");
+    const livenessTimer = setInterval(() => {
+      if (typeof child.exitCode === "number" || child.signalCode) {
+        finish(childExitCode(child.exitCode, child.signalCode));
+        return;
+      }
+      if (typeof child.pid === "number" && child.pid > 0 && !isProcessAlive(child.pid)) {
+        finish(1);
+      }
+    }, 1_000);
+
+    child.once("error", handleError);
+    child.once("exit", handleExit);
+    child.once("close", handleExit);
+    process.once("SIGINT", onSigint);
+    process.once("SIGTERM", onSigterm);
+  });
 }
 
 async function main(argv = process.argv.slice(2)) {
@@ -302,25 +465,16 @@ async function main(argv = process.argv.slice(2)) {
   const resolved = resolveKeybaseContainerConfig();
   await prepareKeybaseContainer(resolved);
 
-  const exitCode = await new Promise((resolve, reject) => {
-    const child = spawn(argv[0], argv.slice(1), {
-      env: {
-        ...process.env,
-        KEYBASE_SERVICE: normalizeOptionalString(process.env.KEYBASE_SERVICE) ?? "1",
-        TMPDIR: normalizeOptionalString(process.env.TMPDIR) ?? resolved.tmpDir,
-      },
-      stdio: "inherit",
-    });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      if (signal) {
-        resolve(1);
-        return;
-      }
-      resolve(typeof code === "number" ? code : 1);
-    });
+  const child = spawn(argv[0], argv.slice(1), {
+    env: {
+      ...process.env,
+      KEYBASE_SERVICE: normalizeOptionalString(process.env.KEYBASE_SERVICE) ?? "1",
+      TMPDIR: normalizeOptionalString(process.env.TMPDIR) ?? resolved.tmpDir,
+    },
+    stdio: "inherit",
   });
 
+  const exitCode = await waitForManagedChild(child);
   process.exit(exitCode);
 }
 

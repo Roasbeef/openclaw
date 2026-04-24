@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,7 +7,18 @@ import {
   applyKeybaseContainerConfig,
   prepareKeybaseContainer,
   resolveKeybaseContainerConfig,
+  runKeybaseContainerEntrypoint,
 } from "./container-entrypoint.js";
+
+type MockChildProcess = {
+  emit: (eventName: string | symbol, ...args: unknown[]) => boolean;
+  exitCode: number | null;
+  kill: (signal?: string) => boolean;
+  killed: boolean;
+  once: (eventName: string | symbol, listener: (...args: unknown[]) => void) => MockChildProcess;
+  pid: number;
+  signalCode: string | null;
+};
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -212,5 +224,64 @@ describe("prepareKeybaseContainer", () => {
     );
 
     expect(oneshotMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("runKeybaseContainerEntrypoint", () => {
+  it("returns the managed child exit code", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "keybase-container-entrypoint-"));
+    cleanups.push(async () => {
+      await rm(rootDir, { recursive: true, force: true });
+    });
+
+    const previousEnv = {
+      OPENCLAW_CONFIG_PATH: process.env.OPENCLAW_CONFIG_PATH,
+      OPENCLAW_KEYBASE_HOME: process.env.OPENCLAW_KEYBASE_HOME,
+      OPENCLAW_KEYBASE_RUNTIME_DIR: process.env.OPENCLAW_KEYBASE_RUNTIME_DIR,
+      OPENCLAW_TMPDIR: process.env.OPENCLAW_TMPDIR,
+    };
+    process.env.OPENCLAW_CONFIG_PATH = path.join(rootDir, "openclaw.json");
+    process.env.OPENCLAW_KEYBASE_HOME = path.join(rootDir, "keybase-home");
+    process.env.OPENCLAW_KEYBASE_RUNTIME_DIR = path.join(rootDir, "runtime");
+    process.env.OPENCLAW_TMPDIR = path.join(rootDir, "tmp");
+
+    const child = new EventEmitter() as unknown as MockChildProcess;
+    child.exitCode = null;
+    child.killed = false;
+    child.pid = process.pid;
+    child.signalCode = null;
+    child.kill = () => {
+      child.killed = true;
+      return true;
+    };
+    const spawnMock = vi.fn(() => {
+      setImmediate(() => child.emit("close", 7, null));
+      return child;
+    });
+
+    try {
+      await expect(
+        runKeybaseContainerEntrypoint(["node", "dist/index.js"], {
+          spawn: spawnMock as never,
+        }),
+      ).resolves.toBe(7);
+      const [command, args, options] = spawnMock.mock.calls[0] as unknown as [
+        string,
+        string[],
+        { env: NodeJS.ProcessEnv; stdio: string },
+      ];
+      expect(command).toBe("node");
+      expect(args).toEqual(["dist/index.js"]);
+      expect(options).toMatchObject({ stdio: "inherit" });
+      expect(options?.env).toMatchObject({ KEYBASE_SERVICE: "1" });
+    } finally {
+      for (const [key, value] of Object.entries(previousEnv)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
   });
 });

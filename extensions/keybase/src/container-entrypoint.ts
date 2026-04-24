@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -244,6 +244,88 @@ function buildSpawnEnv(
   };
 }
 
+function childExitCode(code: number | null, signal: NodeJS.Signals | null): number {
+  if (signal) {
+    return 1;
+  }
+  return typeof code === "number" ? code : 1;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function terminateChild(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (!child.killed) {
+    child.kill(signal);
+  }
+}
+
+async function waitForManagedChild(child: ChildProcess): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    let settled = false;
+    let shutdownTimer: NodeJS.Timeout | undefined;
+    const finish = (exitCode: number) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearInterval(livenessTimer);
+      if (shutdownTimer) {
+        clearTimeout(shutdownTimer);
+      }
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      resolve(exitCode);
+    };
+    const handleExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      finish(childExitCode(code, signal));
+    };
+    const handleError = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearInterval(livenessTimer);
+      if (shutdownTimer) {
+        clearTimeout(shutdownTimer);
+      }
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      reject(error);
+    };
+    const forwardSignal = (signal: NodeJS.Signals) => {
+      terminateChild(child, signal);
+      shutdownTimer = setTimeout(() => {
+        terminateChild(child, "SIGKILL");
+        finish(1);
+      }, 15_000);
+    };
+    const onSigint = () => forwardSignal("SIGINT");
+    const onSigterm = () => forwardSignal("SIGTERM");
+    const livenessTimer = setInterval(() => {
+      if (typeof child.exitCode === "number" || child.signalCode) {
+        finish(childExitCode(child.exitCode, child.signalCode));
+        return;
+      }
+      if (typeof child.pid === "number" && child.pid > 0 && !isProcessAlive(child.pid)) {
+        finish(1);
+      }
+    }, 1_000);
+
+    child.once("error", handleError);
+    child.once("exit", handleExit);
+    child.once("close", handleExit);
+    process.once("SIGINT", onSigint);
+    process.once("SIGTERM", onSigterm);
+  });
+}
+
 export async function runKeybaseContainerEntrypoint(
   argv: readonly string[],
   deps: Partial<RuntimeDeps> = {},
@@ -256,20 +338,12 @@ export async function runKeybaseContainerEntrypoint(
   const resolved = resolveKeybaseContainerConfig();
   await prepareKeybaseContainer(resolved, runtimeDeps);
 
-  return await new Promise<number>((resolve, reject) => {
-    const child = runtimeDeps.spawn(argv[0], argv.slice(1), {
-      env: buildSpawnEnv(resolved),
-      stdio: "inherit",
-    });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      if (signal) {
-        process.kill(process.pid, signal);
-        return;
-      }
-      resolve(code ?? 0);
-    });
+  const child = runtimeDeps.spawn(argv[0], argv.slice(1), {
+    env: buildSpawnEnv(resolved),
+    stdio: "inherit",
   });
+
+  return await waitForManagedChild(child);
 }
 
 export async function main(argv: readonly string[] = process.argv.slice(2)) {

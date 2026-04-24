@@ -2,6 +2,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import {
   buildKeybaseDockerSmokeImage,
+  runKeybaseDockerBlackboxSuite,
   runKeybaseDockerBlackboxSmoke,
   resolveDefaultKeybaseDockerOutputDir,
   writeKeybaseDockerSmokeFiles,
@@ -12,6 +13,7 @@ function usage() {
   pnpm keybase:smoke:build [--image <name>] [--base-image <name>] [--platform <platform>]
   pnpm keybase:smoke:scaffold [--output-dir <path>] [--image <name>] [--platform <platform>] [--gateway-port <port>]
   pnpm keybase:smoke:blackbox --bot <username> [--team <team>] [--output-dir <path>] [--timeout-ms <ms>]
+  pnpm keybase:smoke:suite --bot <username> [--team <team>] [--scenario <id>] [--output-dir <path>] [--timeout-ms <ms>] [--negative-wait-ms <ms>]
 `);
 }
 
@@ -54,8 +56,10 @@ async function main() {
       help: { type: "boolean", short: "h" },
       image: { type: "string" },
       message: { type: "string" },
+      "negative-wait-ms": { type: "string" },
       "output-dir": { type: "string" },
       platform: { type: "string" },
+      scenario: { type: "string", multiple: true },
       team: { type: "string" },
       "timeout-ms": { type: "string" },
     },
@@ -113,6 +117,35 @@ async function main() {
       process.stdout.write(
         `Keybase blackbox smoke passed:\n- team: ${result.team}\n- bot: ${result.botUsername}\n- sent message id: ${result.sentMessageId}\n- inboundAt: ${result.inboundAt}\n- outboundAt: ${result.outboundAt}\n- reply: ${result.replyPreview}\n`,
       );
+      if (result.ackReactionBody) {
+        process.stdout.write(
+          `- ack reaction: ${result.ackReactionBody} (${result.ackReactionMessageId ?? "unknown id"})\n`,
+        );
+      }
+      return;
+    }
+    case "suite": {
+      const outputDir = path.resolve(
+        args.values["output-dir"] ?? resolveDefaultKeybaseDockerOutputDir(repoRoot),
+      );
+      const result = await runKeybaseDockerBlackboxSuite({
+        botUsername:
+          args.values.bot ??
+          process.env.KEYBASE_TEST_BOT_USERNAME ??
+          process.env.KEYBASE_USERNAME ??
+          "",
+        negativeWaitMs: parsePositiveInteger(args.values["negative-wait-ms"], "negative-wait-ms"),
+        outputDir,
+        scenarioIds: args.values.scenario,
+        team: args.values.team ?? process.env.KEYBASE_TEST_TEAM ?? "lbottest",
+        timeoutMs: parsePositiveInteger(args.values["timeout-ms"], "timeout-ms"),
+      });
+      process.stdout.write(
+        `Keybase blackbox suite finished:\n- team: ${result.team}\n- bot: ${result.botUsername}\n- passed: ${result.passed}\n- failed: ${result.failed}\n- report: ${result.reportPath}\n- summary: ${result.summaryPath}\n`,
+      );
+      if (result.failed > 0) {
+        process.exitCode = 1;
+      }
       return;
     }
     default:

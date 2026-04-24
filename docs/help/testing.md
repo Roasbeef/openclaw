@@ -126,6 +126,12 @@ runs the same lanes before release approval.
   - Uses the pinned stable Tuwunel image `ghcr.io/matrix-construct/tuwunel:v1.5.1` by default. Override with `OPENCLAW_QA_MATRIX_TUWUNEL_IMAGE` when you need to test a different image.
   - Matrix does not expose shared credential-source flags because the lane provisions disposable users locally.
   - Writes a Matrix QA report, summary, observed-events artifact, and combined stdout/stderr output log under `.artifacts/qa-e2e/...`.
+- `pnpm openclaw qa keybase`
+  - Runs the Keybase live QA lane against local Docker containers for a Keybase bot identity and a separate sender identity.
+  - Requires the Keybase smoke scaffold under `.artifacts/keybase-docker`, filled `.env`, bot paper key, sender paper key, and a real test team such as `lbottest`.
+  - Installs the requested `team#general` route in the local smoke config before running assertions.
+  - Covers team-channel canary reply, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation.
+  - Writes a Keybase QA report and summary under the smoke output directory.
 - `pnpm openclaw qa telegram`
   - Runs the Telegram live QA lane against a real private group using the driver and SUT bot tokens from env.
   - Requires `OPENCLAW_QA_TELEGRAM_GROUP_ID`, `OPENCLAW_QA_TELEGRAM_DRIVER_BOT_TOKEN`, and `OPENCLAW_QA_TELEGRAM_SUT_BOT_TOKEN`. The group id must be the numeric Telegram chat id.
@@ -141,10 +147,11 @@ Live transport lanes share one standard contract so new transports do not drift:
 `qa-channel` remains the broad synthetic QA suite and is not part of the live
 transport coverage matrix.
 
-| Lane     | Canary | Mention gating | Allowlist block | Top-level reply | Restart resume | Thread follow-up | Thread isolation | Reaction observation | Help command |
-| -------- | ------ | -------------- | --------------- | --------------- | -------------- | ---------------- | ---------------- | -------------------- | ------------ |
-| Matrix   | x      | x              | x               | x               | x              | x                | x                | x                    |              |
-| Telegram | x      |                |                 |                 |                |                  |                  |                      | x            |
+| Lane     | Canary | DM reply | DM pairing | Mention gating | Allowlist block | Top-level reply | Restart resume | Thread follow-up | Thread isolation | Reaction observation | Help command |
+| -------- | ------ | -------- | ---------- | -------------- | --------------- | --------------- | -------------- | ---------------- | ---------------- | -------------------- | ------------ |
+| Keybase  | x      | x        | x          | x              | x               | x               | x              |                  |                  | x                    | x            |
+| Matrix   | x      |          |            | x              | x               | x               | x              | x                | x                | x                    |              |
+| Telegram | x      |          |            |                |                 |                 |                |                  |                  |                      | x            |
 
 ### Shared Telegram credentials via Convex (v1)
 

@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildKeybaseDockerSmokeImage,
+  runKeybaseDockerBlackboxSuite,
   runKeybaseDockerBlackboxSmoke,
   writeKeybaseDockerSmokeFiles,
 } from "./docker-smoke.js";
@@ -96,6 +97,7 @@ describe("writeKeybaseDockerSmokeFiles", () => {
     expect(readme).toContain("--socket-file /tmp/openclaw-keybase/keybased.sock");
     expect(readme).toContain("openclaw-keybase-cli");
     expect(readme).toContain("pnpm keybase:smoke:blackbox");
+    expect(readme).toContain("pnpm openclaw qa keybase");
   });
 });
 
@@ -135,6 +137,13 @@ describe("buildKeybaseDockerSmokeImage", () => {
 
 describe("runKeybaseDockerBlackboxSmoke", () => {
   it("starts the sender profile, sends a test mention, and waits for a reply", async () => {
+    const outputDir = await mkdtemp(path.join(os.tmpdir(), "keybase-blackbox-smoke-"));
+    cleanups.push(async () => {
+      await rm(outputDir, { recursive: true, force: true });
+    });
+    await writeKeybaseDockerSmokeFiles({
+      outputDir,
+    });
     const calls: string[] = [];
     const now = vi.spyOn(Date, "now").mockReturnValue(1_776_994_500_000);
 
@@ -142,7 +151,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
       const result = await runKeybaseDockerBlackboxSmoke(
         {
           botUsername: "lbottestbot",
-          outputDir: "/repo/openclaw/.artifacts/keybase-docker",
+          outputDir,
           team: "lbottest",
         },
         {
@@ -162,6 +171,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
                         lastError: null,
                         lastInboundAt: 1_776_994_501_000,
                         lastOutboundAt: 1_776_994_502_000,
+                        lastStartAt: 1_776_994_500_000,
                       },
                     ],
                   },
@@ -200,6 +210,20 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
                       messages: [
                         {
                           msg: {
+                            id: 103,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_501_500,
+                            content: {
+                              type: "reaction",
+                              reaction: {
+                                b: ":eyes:",
+                                m: 101,
+                              },
+                            },
+                          },
+                        },
+                        {
+                          msg: {
                             id: 102,
                             sender: { username: "lbottestbot" },
                             sent_at_ms: 1_776_994_502_000,
@@ -224,6 +248,8 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
       );
 
       expect(result).toMatchObject({
+        ackReactionBody: ":eyes:",
+        ackReactionMessageId: "103",
         botUsername: "lbottestbot",
         inboundAt: 1_776_994_501_000,
         outboundAt: 1_776_994_502_000,
@@ -232,9 +258,378 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
         team: "lbottest",
       });
       expect(calls[0]).toContain(
-        "docker compose --env-file /repo/openclaw/.artifacts/keybase-docker/.env -f /repo/openclaw/.artifacts/keybase-docker/docker-compose.keybase.yml --profile blackbox up -d openclaw-keybase-gateway openclaw-keybase-sender",
+        `docker compose --env-file ${outputDir}/.env -f ${outputDir}/docker-compose.keybase.yml --profile blackbox up -d openclaw-keybase-gateway openclaw-keybase-sender`,
       );
       expect(calls.some((call) => call.includes("openclaw-keybase-sender keybase"))).toBe(true);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("runs a selected blackbox suite and writes report artifacts", async () => {
+    const outputDir = await mkdtemp(path.join(os.tmpdir(), "keybase-blackbox-suite-"));
+    cleanups.push(async () => {
+      await rm(outputDir, { recursive: true, force: true });
+    });
+    await writeKeybaseDockerSmokeFiles({
+      outputDir,
+    });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_776_994_600_000);
+
+    try {
+      const result = await runKeybaseDockerBlackboxSuite(
+        {
+          botUsername: "lbottestbot",
+          negativeWaitMs: 1,
+          outputDir,
+          scenarioIds: ["canary", "help-command"],
+          team: "lbottest",
+        },
+        {
+          async runCommand(_command, args) {
+            if (args.includes("whoami")) {
+              return { stderr: "", stdout: "ok\n" };
+            }
+            if (args.includes("channels") && args.includes("status")) {
+              return {
+                stderr: "",
+                stdout: JSON.stringify({
+                  channelAccounts: {
+                    keybase: [
+                      {
+                        running: true,
+                        lastError: null,
+                        lastInboundAt: 1_776_994_601_000,
+                        lastOutboundAt: 1_776_994_602_000,
+                        lastStartAt: 1_776_994_600_000,
+                      },
+                    ],
+                  },
+                }),
+              };
+            }
+            const apiIndex = args.indexOf("-m");
+            if (apiIndex >= 0) {
+              const request = JSON.parse(args[apiIndex + 1]) as {
+                method?: string;
+                params?: {
+                  options?: {
+                    message?: { body?: string };
+                  };
+                };
+              };
+              if (request.method === "list") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      conversations: [
+                        {
+                          id: "conv-team",
+                          is_default_conv: true,
+                          channel: { name: "lbottest", members_type: "team" },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+              if (request.method === "send") {
+                const body = request.params?.options?.message?.body ?? "";
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: { id: body.includes("/help") ? 301 : 201 },
+                  }),
+                };
+              }
+              if (request.method === "read") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      messages: [
+                        {
+                          msg: {
+                            id: 203,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_601_500,
+                            content: {
+                              type: "reaction",
+                              reaction: {
+                                b: ":eyes:",
+                                m: 201,
+                              },
+                            },
+                          },
+                        },
+                        {
+                          msg: {
+                            id: 202,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_602_000,
+                            content: {
+                              type: "text",
+                              text: {
+                                replyTo: 201,
+                                body: "keybase blackbox canary ok",
+                              },
+                            },
+                          },
+                        },
+                        {
+                          msg: {
+                            id: 303,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_601_500,
+                            content: {
+                              type: "reaction",
+                              reaction: {
+                                b: ":eyes:",
+                                m: 301,
+                              },
+                            },
+                          },
+                        },
+                        {
+                          msg: {
+                            id: 302,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_602_000,
+                            content: {
+                              type: "text",
+                              text: {
+                                replyTo: 301,
+                                body: "Help\n\nMore: /commands for full list, /tools for available capabilities",
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+            }
+            return { stderr: "", stdout: "" };
+          },
+        },
+      );
+
+      expect(result.passed).toBe(2);
+      expect(result.failed).toBe(0);
+      expect(result.scenarios).toEqual([
+        expect.objectContaining({
+          id: "canary",
+          status: "passed",
+          details: expect.objectContaining({
+            ackReactionBody: ":eyes:",
+            replyPreview: "keybase blackbox canary ok",
+            sentMessageId: "201",
+          }),
+        }),
+        expect.objectContaining({
+          id: "help-command",
+          status: "passed",
+          details: expect.objectContaining({
+            ackReactionBody: ":eyes:",
+            replyPreview:
+              "Help\n\nMore: /commands for full list, /tools for available capabilities",
+            sentMessageId: "301",
+          }),
+        }),
+      ]);
+      await expect(readFile(result.reportPath, "utf8")).resolves.toContain('"canary"');
+      await expect(readFile(result.reportPath, "utf8")).resolves.toContain('"help-command"');
+      await expect(readFile(result.summaryPath, "utf8")).resolves.toContain("Keybase Blackbox QA");
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("runs direct-message blackbox scenarios", async () => {
+    const outputDir = await mkdtemp(path.join(os.tmpdir(), "keybase-blackbox-dm-suite-"));
+    cleanups.push(async () => {
+      await rm(outputDir, { recursive: true, force: true });
+    });
+    await writeKeybaseDockerSmokeFiles({
+      outputDir,
+    });
+    const pairingStorePath = path.join(
+      outputDir,
+      "state",
+      "home",
+      ".openclaw",
+      "credentials",
+      "keybase-pairing.json",
+    );
+    await mkdir(path.dirname(pairingStorePath), { recursive: true });
+    await writeFile(
+      pairingStorePath,
+      JSON.stringify({
+        version: 1,
+        requests: [{ code: "STALE", id: "lbottestuser2" }],
+      }),
+      "utf8",
+    );
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_776_994_700_000);
+
+    try {
+      const result = await runKeybaseDockerBlackboxSuite(
+        {
+          botUsername: "lbottestbot",
+          outputDir,
+          scenarioIds: ["dm-canary", "dm-pairing"],
+          team: "lbottest",
+        },
+        {
+          async runCommand(_command, args) {
+            if (args.includes("whoami")) {
+              return {
+                stderr: "",
+                stdout: args.includes("openclaw-keybase-sender")
+                  ? "lbottestuser2\n"
+                  : "lbottestbot\n",
+              };
+            }
+            if (args.includes("channels") && args.includes("status")) {
+              return {
+                stderr: "",
+                stdout: JSON.stringify({
+                  channelAccounts: {
+                    keybase: [
+                      {
+                        running: true,
+                        lastError: null,
+                        lastInboundAt: 1_776_994_701_000,
+                        lastOutboundAt: 1_776_994_702_000,
+                        lastStartAt: 1_776_994_700_000,
+                      },
+                    ],
+                  },
+                }),
+              };
+            }
+            const apiIndex = args.indexOf("-m");
+            if (apiIndex >= 0) {
+              const request = JSON.parse(args[apiIndex + 1]) as {
+                method?: string;
+                params?: {
+                  options?: {
+                    message?: { body?: string };
+                  };
+                };
+              };
+              if (request.method === "list") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      conversations: [
+                        {
+                          id: "conv-team",
+                          is_default_conv: true,
+                          channel: { name: "lbottest", members_type: "team" },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+              if (request.method === "send") {
+                const body = request.params?.options?.message?.body ?? "";
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: { id: body.includes("pairing challenge") ? 401 : 301 },
+                  }),
+                };
+              }
+              if (request.method === "read") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      messages: [
+                        {
+                          msg: {
+                            id: 303,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_701_500,
+                            content: {
+                              type: "reaction",
+                              reaction: {
+                                b: ":eyes:",
+                                m: 301,
+                              },
+                            },
+                          },
+                        },
+                        {
+                          msg: {
+                            id: 302,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_702_000,
+                            content: {
+                              type: "text",
+                              text: {
+                                replyTo: 301,
+                                body: "keybase dm canary ok",
+                              },
+                            },
+                          },
+                        },
+                        {
+                          msg: {
+                            id: 402,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_702_000,
+                            content: {
+                              type: "text",
+                              text: {
+                                replyTo: 401,
+                                body: "Pairing code: 123456",
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+            }
+            return { stderr: "", stdout: "" };
+          },
+        },
+      );
+
+      expect(result.passed).toBe(2);
+      expect(result.failed).toBe(0);
+      expect(result.scenarios).toEqual([
+        expect.objectContaining({
+          id: "dm-canary",
+          status: "passed",
+          details: expect.objectContaining({
+            replyPreview: "keybase dm canary ok",
+            senderUsername: "lbottestuser2",
+            sentMessageId: "301",
+          }),
+        }),
+        expect.objectContaining({
+          id: "dm-pairing",
+          status: "passed",
+          details: expect.objectContaining({
+            replyMessageId: "402",
+            replyPreview: "Pairing code: 123456",
+            senderUsername: "lbottestuser2",
+            sentMessageId: "401",
+          }),
+        }),
+      ]);
+      await expect(readFile(pairingStorePath, "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     } finally {
       now.mockRestore();
     }

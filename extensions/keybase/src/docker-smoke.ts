@@ -29,12 +29,42 @@ export interface KeybaseDockerSmokeImageResult {
 }
 
 export interface KeybaseDockerBlackboxResult {
+  ackReactionBody?: string;
+  ackReactionMessageId?: string;
   botUsername: string;
   inboundAt: number;
   marker: string;
   outboundAt: number;
   replyPreview: string;
   sentMessageId: string;
+  team: string;
+}
+
+export type KeybaseDockerBlackboxScenarioId =
+  | "allowlist-block"
+  | "canary"
+  | "dm-canary"
+  | "dm-pairing"
+  | "help-command"
+  | "mention-gating"
+  | "restart-resume";
+
+export interface KeybaseDockerBlackboxScenarioResult {
+  details?: Record<string, unknown>;
+  error?: string;
+  finishedAt: number;
+  id: KeybaseDockerBlackboxScenarioId;
+  startedAt: number;
+  status: "failed" | "passed";
+}
+
+export interface KeybaseDockerBlackboxSuiteResult {
+  botUsername: string;
+  failed: number;
+  passed: number;
+  reportPath: string;
+  scenarios: KeybaseDockerBlackboxScenarioResult[];
+  summaryPath: string;
   team: string;
 }
 
@@ -48,6 +78,16 @@ const DEFAULT_KEYBASE_SOCKET_FILE = `${DEFAULT_KEYBASE_RUNTIME_DIR}/keybased.soc
 const DEFAULT_OPENCLAW_HOME = "/home/node/.openclaw";
 const DEFAULT_OPENCLAW_TMPDIR = `${DEFAULT_OPENCLAW_HOME}/tmp`;
 const DEFAULT_PLATFORM = "linux/amd64";
+const DEFAULT_BLACKBOX_ACK_REACTION = ":eyes:";
+const DEFAULT_BLACKBOX_SCENARIOS: readonly KeybaseDockerBlackboxScenarioId[] = [
+  "canary",
+  "help-command",
+  "dm-pairing",
+  "dm-canary",
+  "mention-gating",
+  "allowlist-block",
+  "restart-resume",
+];
 const GATEWAY_SERVICE = "openclaw-keybase-gateway";
 const SENDER_SERVICE = "openclaw-keybase-sender";
 
@@ -240,6 +280,9 @@ Generated scaffold for a local Keybase-backed OpenClaw smoke run.
    - fill \`KEYBASE_TEST_USERNAME\` and either \`KEYBASE_TEST_PAPERKEY\` or \`KEYBASE_TEST_PAPERKEY_FILE\`
    - ensure that test identity is already a member of \`KEYBASE_TEST_TEAM\`
    - \`pnpm keybase:smoke:blackbox --output-dir . --team "$KEYBASE_TEST_TEAM" --bot "$KEYBASE_TEST_BOT_USERNAME"\`
+9. Full QA runner:
+   - \`pnpm openclaw qa keybase --output-dir . --team "$KEYBASE_TEST_TEAM" --bot "$KEYBASE_TEST_BOT_USERNAME"\`
+   - covers team-channel canary reply, tagged help command, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation
 
 ## Notes
 
@@ -484,9 +527,20 @@ type KeybaseConversationSummary = {
   is_default_conv?: boolean;
 };
 
+type KeybaseBlackboxConversation =
+  | { channel: { members_type?: string; name: string; topic_name?: string; topic_type?: string } }
+  | { conversation_id: string };
+
 type KeybaseMessageSummary = {
   msg?: {
     content?: {
+      reaction?: {
+        b?: string;
+        body?: string;
+        m?: number | string;
+        message_id?: number | string;
+        messageID?: number | string;
+      };
       text?: {
         body?: string;
         replyTo?: number;
@@ -517,6 +571,100 @@ function normalizeMessageId(value: number | string | null | undefined): string {
     return value.trim();
   }
   return "";
+}
+
+function normalizeReactionBody(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed === "👀") {
+    return ":eyes:";
+  }
+  return trimmed;
+}
+
+function normalizeUsername(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function readTextReplyToId(message: KeybaseMessageSummary): string {
+  return normalizeMessageId(message.msg?.content?.text?.replyTo);
+}
+
+function readReactionTargetId(message: KeybaseMessageSummary): string {
+  const reaction = message.msg?.content?.reaction;
+  return normalizeMessageId(reaction?.m ?? reaction?.messageID ?? reaction?.message_id);
+}
+
+function readReactionBody(message: KeybaseMessageSummary): string {
+  const reaction = message.msg?.content?.reaction;
+  return normalizeReactionBody(reaction?.b ?? reaction?.body ?? "");
+}
+
+function readMessageBody(message: KeybaseMessageSummary): string {
+  return message.msg?.content?.text?.body?.trim() ?? "";
+}
+
+function readMessageSender(message: KeybaseMessageSummary): string {
+  return normalizeUsername(message.msg?.sender?.username ?? "");
+}
+
+function findBotReplyToMessage(params: {
+  botUsername: string;
+  messages: readonly KeybaseMessageSummary[];
+  sentMessageId: string;
+  startedAt: number;
+}): KeybaseMessageSummary | undefined {
+  const normalizedBot = normalizeUsername(params.botUsername);
+  const isBotText = (entry: KeybaseMessageSummary) => {
+    const msg = entry.msg;
+    return Boolean(
+      msg && readMessageSender(entry) === normalizedBot && msg.content?.type === "text",
+    );
+  };
+  const exactReply = params.messages.find(
+    (entry) => isBotText(entry) && readTextReplyToId(entry) === params.sentMessageId,
+  );
+  if (exactReply) {
+    return exactReply;
+  }
+  return params.messages.find(
+    (entry) => isBotText(entry) && (entry.msg?.sent_at_ms ?? 0) >= params.startedAt,
+  );
+}
+
+function findBotReactionToMessage(params: {
+  botUsername: string;
+  expectedBody?: string;
+  messages: readonly KeybaseMessageSummary[];
+  sentMessageId: string;
+}): KeybaseMessageSummary | undefined {
+  const normalizedBot = normalizeUsername(params.botUsername);
+  const expectedBody = params.expectedBody ? normalizeReactionBody(params.expectedBody) : undefined;
+  return params.messages.find((entry) => {
+    if (
+      readMessageSender(entry) !== normalizedBot ||
+      entry.msg?.content?.type !== "reaction" ||
+      readReactionTargetId(entry) !== params.sentMessageId
+    ) {
+      return false;
+    }
+    return !expectedBody || readReactionBody(entry) === expectedBody;
+  });
+}
+
+function findBotResponseToMessage(params: {
+  botUsername: string;
+  messages: readonly KeybaseMessageSummary[];
+  sentMessageId: string;
+  startedAt: number;
+}): KeybaseMessageSummary | undefined {
+  return (
+    findBotReplyToMessage(params) ??
+    findBotReactionToMessage({
+      botUsername: params.botUsername,
+      messages: params.messages,
+      sentMessageId: params.sentMessageId,
+    })
+  );
 }
 
 function buildComposeArgs(params: {
@@ -604,6 +752,34 @@ async function runKeybaseApiInService<TResult>(params: {
   return envelope.result;
 }
 
+async function readKeybaseMessagesInSender(params: {
+  conversation: KeybaseBlackboxConversation;
+  composeFile: string;
+  cwd: string;
+  envFile: string;
+  num?: number;
+  runCommand: RunCommand;
+}): Promise<KeybaseMessageSummary[]> {
+  const readResult = await runKeybaseApiInService<{ messages?: KeybaseMessageSummary[] }>({
+    composeFile: params.composeFile,
+    cwd: params.cwd,
+    envFile: params.envFile,
+    runCommand: params.runCommand,
+    service: SENDER_SERVICE,
+    request: {
+      method: "read",
+      params: {
+        options: {
+          ...params.conversation,
+          pagination: { num: params.num ?? 20 },
+          peek: true,
+        },
+      },
+    },
+  });
+  return readResult.messages ?? [];
+}
+
 function findDefaultTeamConversationId(params: {
   conversations: readonly KeybaseConversationSummary[];
   team: string;
@@ -633,6 +809,7 @@ async function readChannelStatus(params: {
 }): Promise<{
   inboundAt: number;
   lastError: string | null;
+  lastStartAt: number;
   outboundAt: number;
   running: boolean;
 }> {
@@ -650,6 +827,7 @@ async function readChannelStatus(params: {
         lastError?: string | null;
         lastInboundAt?: number | null;
         lastOutboundAt?: number | null;
+        lastStartAt?: number | null;
         running?: boolean;
       }>;
     };
@@ -658,9 +836,40 @@ async function readChannelStatus(params: {
   return {
     inboundAt: keybase?.lastInboundAt ?? 0,
     lastError: keybase?.lastError ?? null,
+    lastStartAt: keybase?.lastStartAt ?? 0,
     outboundAt: keybase?.lastOutboundAt ?? 0,
     running: keybase?.running === true,
   };
+}
+
+async function waitForKeybaseChannelRunning(params: {
+  composeFile: string;
+  cwd: string;
+  envFile: string;
+  minLastStartAt?: number;
+  runCommand: RunCommand;
+  settleMs?: number;
+  timeoutMs: number;
+}): Promise<void> {
+  const deadline = Date.now() + params.timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const status = await readChannelStatus(params);
+      if (
+        status.running &&
+        (!params.minLastStartAt || status.lastStartAt >= params.minLastStartAt)
+      ) {
+        await sleep(params.settleMs ?? 500);
+        return;
+      }
+      lastError = status.lastError ?? "channel is not running yet";
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(1000);
+  }
+  throw new Error(`Timed out waiting for Keybase channel to run: ${String(lastError)}`);
 }
 
 async function waitForServiceWhoami(params: {
@@ -670,12 +879,20 @@ async function waitForServiceWhoami(params: {
   runCommand: RunCommand;
   service: string;
   timeoutMs: number;
-}): Promise<void> {
+}): Promise<string> {
   const deadline = Date.now() + params.timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {
       await runComposeExec({
+        composeFile: params.composeFile,
+        cwd: params.cwd,
+        envFile: params.envFile,
+        runCommand: params.runCommand,
+        service: params.service,
+        command: ["test", "-S", DEFAULT_KEYBASE_SOCKET_FILE],
+      });
+      const result = await runComposeExec({
         composeFile: params.composeFile,
         cwd: params.cwd,
         envFile: params.envFile,
@@ -692,7 +909,15 @@ async function waitForServiceWhoami(params: {
           "whoami",
         ],
       });
-      return;
+      const username = result.stdout
+        .split(/\r?\n/)
+        .toReversed()
+        .find((line) => line.trim().length > 0)
+        ?.trim();
+      if (!username) {
+        throw new Error("keybase whoami did not return a username");
+      }
+      return username;
     } catch (error) {
       lastError = error;
       await sleep(2000);
@@ -703,17 +928,30 @@ async function waitForServiceWhoami(params: {
 
 async function waitForBlackboxReply(params: {
   botUsername: string;
+  conversation: KeybaseBlackboxConversation;
   composeFile: string;
-  conversationId: string;
   cwd: string;
   envFile: string;
+  expectedAckReaction?: string | false;
   runCommand: RunCommand;
   sentMessageId: string;
   startedAt: number;
   timeoutMs: number;
-}): Promise<{ inboundAt: number; outboundAt: number; replyPreview: string }> {
+}): Promise<{
+  ackReactionBody?: string;
+  ackReactionMessageId?: string;
+  inboundAt: number;
+  outboundAt: number;
+  replyBody: string;
+  replyMessageId: string;
+  replyPreview: string;
+}> {
   const deadline = Date.now() + params.timeoutMs;
   let lastStatusError: string | null = null;
+  const expectedAckReaction =
+    params.expectedAckReaction === false
+      ? undefined
+      : normalizeReactionBody(params.expectedAckReaction ?? DEFAULT_BLACKBOX_ACK_REACTION);
   while (Date.now() < deadline) {
     let hasFreshStatus = false;
     let inboundAt = 0;
@@ -731,41 +969,38 @@ async function waitForBlackboxReply(params: {
       lastStatusError = String(error);
     }
 
-    const readResult = await runKeybaseApiInService<{ messages?: KeybaseMessageSummary[] }>({
+    const messages = await readKeybaseMessagesInSender({
       composeFile: params.composeFile,
+      conversation: params.conversation,
       cwd: params.cwd,
       envFile: params.envFile,
       runCommand: params.runCommand,
-      service: SENDER_SERVICE,
-      request: {
-        method: "read",
-        params: {
-          options: {
-            conversation_id: params.conversationId,
-            pagination: { num: 10 },
-            peek: true,
-          },
-        },
-      },
     });
-    const reply = (readResult.messages ?? []).find((entry) => {
-      const msg = entry.msg;
-      if (!msg) {
-        return false;
-      }
-      const sender = msg.sender?.username?.trim().toLowerCase();
-      const replyTo = msg.content?.text?.replyTo;
-      return (
-        sender === params.botUsername.trim().toLowerCase() &&
-        (String(replyTo ?? "") === params.sentMessageId ||
-          (msg.sent_at_ms ?? 0) >= params.startedAt)
-      );
+    const reply = findBotReplyToMessage({
+      botUsername: params.botUsername,
+      messages,
+      sentMessageId: params.sentMessageId,
+      startedAt: params.startedAt,
     });
-    const replyBody = reply?.msg?.content?.text?.body?.trim();
-    if (hasFreshStatus && replyBody) {
+    const reaction = expectedAckReaction
+      ? findBotReactionToMessage({
+          botUsername: params.botUsername,
+          expectedBody: expectedAckReaction,
+          messages,
+          sentMessageId: params.sentMessageId,
+        })
+      : undefined;
+    const replyBody = reply ? readMessageBody(reply) : "";
+    if (reply && hasFreshStatus && replyBody && (!expectedAckReaction || reaction)) {
+      const reactionBody = reaction ? readReactionBody(reaction) : undefined;
+      const reactionMessageId = normalizeMessageId(reaction?.msg?.id);
       return {
+        ...(reactionBody ? { ackReactionBody: reactionBody } : {}),
+        ...(reactionMessageId ? { ackReactionMessageId: reactionMessageId } : {}),
         inboundAt,
         outboundAt,
+        replyBody,
+        replyMessageId: normalizeMessageId(reply.msg?.id),
         replyPreview: replyBody.slice(0, 240),
       };
     }
@@ -776,27 +1011,113 @@ async function waitForBlackboxReply(params: {
   );
 }
 
-export async function runKeybaseDockerBlackboxSmoke(
-  params: {
-    botUsername: string;
-    composeFile?: string;
-    envFile?: string;
-    message?: string;
-    outputDir: string;
-    team: string;
-    timeoutMs?: number;
-  },
-  deps: {
-    runCommand?: RunCommand;
-  } = {},
-): Promise<KeybaseDockerBlackboxResult> {
+async function waitForNoAdditionalBotTextReply(params: {
+  allowedReplyMessageId: string;
+  botUsername: string;
+  conversation: KeybaseBlackboxConversation;
+  composeFile: string;
+  cwd: string;
+  envFile: string;
+  quietMs: number;
+  runCommand: RunCommand;
+  sentMessageId: string;
+  startedAt: number;
+}): Promise<void> {
+  await sleep(Math.max(0, params.quietMs));
+  const messages = await readKeybaseMessagesInSender({
+    composeFile: params.composeFile,
+    conversation: params.conversation,
+    cwd: params.cwd,
+    envFile: params.envFile,
+    runCommand: params.runCommand,
+  });
+  const normalizedBot = normalizeUsername(params.botUsername);
+  const extraReply = messages.find((entry) => {
+    const msg = entry.msg;
+    return Boolean(
+      msg &&
+      readMessageSender(entry) === normalizedBot &&
+      msg.content?.type === "text" &&
+      readTextReplyToId(entry) === params.sentMessageId &&
+      normalizeMessageId(msg.id) !== params.allowedReplyMessageId &&
+      (msg.sent_at_ms ?? 0) >= params.startedAt,
+    );
+  });
+  if (extraReply) {
+    throw new Error(
+      `Expected only one Keybase bot text reply to ${params.sentMessageId}, but observed extra message ${normalizeMessageId(extraReply.msg?.id)}`,
+    );
+  }
+}
+
+async function waitForNoBotResponse(params: {
+  botUsername: string;
+  conversation: KeybaseBlackboxConversation;
+  composeFile: string;
+  cwd: string;
+  envFile: string;
+  quietMs: number;
+  runCommand: RunCommand;
+  sentMessageId: string;
+  startedAt: number;
+}): Promise<void> {
+  const deadline = Date.now() + params.quietMs;
+  while (Date.now() < deadline) {
+    const messages = await readKeybaseMessagesInSender({
+      composeFile: params.composeFile,
+      conversation: params.conversation,
+      cwd: params.cwd,
+      envFile: params.envFile,
+      runCommand: params.runCommand,
+    });
+    const response = findBotResponseToMessage({
+      botUsername: params.botUsername,
+      messages,
+      sentMessageId: params.sentMessageId,
+      startedAt: params.startedAt,
+    });
+    if (response) {
+      throw new Error(
+        `Expected no Keybase bot response to ${params.sentMessageId}, but observed message ${normalizeMessageId(response.msg?.id)}`,
+      );
+    }
+    await sleep(Math.min(3000, Math.max(250, params.quietMs)));
+  }
+}
+
+type KeybaseBlackboxContext = {
+  botUsername: string;
+  composeFile: string;
+  conversationId: string;
+  envFile: string;
+  outputDir: string;
+  runCommand: RunCommand;
+  senderUsername: string;
+  team: string;
+};
+
+function resolveKeybaseBlackboxPaths(params: {
+  composeFile?: string;
+  envFile?: string;
+  outputDir: string;
+  runCommand?: RunCommand;
+}): Pick<KeybaseBlackboxContext, "composeFile" | "envFile" | "outputDir" | "runCommand"> {
   const outputDir = path.resolve(params.outputDir);
   const composeFile = path.resolve(outputDir, params.composeFile ?? "docker-compose.keybase.yml");
   const envFile = path.resolve(outputDir, params.envFile ?? ".env");
-  const runCommand = deps.runCommand ?? defaultRunCommand;
-  const timeoutMs = params.timeoutMs ?? 180_000;
-  const startedAt = Date.now();
-  const marker = `keybase-blackbox-${startedAt}`;
+  const runCommand = params.runCommand ?? defaultRunCommand;
+  return { composeFile, envFile, outputDir, runCommand };
+}
+
+async function prepareKeybaseBlackboxContext(params: {
+  botUsername: string;
+  composeFile?: string;
+  envFile?: string;
+  outputDir: string;
+  runCommand?: RunCommand;
+  team: string;
+}): Promise<KeybaseBlackboxContext> {
+  const paths = resolveKeybaseBlackboxPaths(params);
   const botUsername = params.botUsername.trim();
   if (!botUsername) {
     throw new Error("Keybase blackbox bot username is required");
@@ -805,12 +1126,20 @@ export async function runKeybaseDockerBlackboxSmoke(
   if (!team) {
     throw new Error("Keybase blackbox team is required");
   }
+  await ensureBaseQaConfig({
+    outputDir: paths.outputDir,
+    team,
+  });
 
   await runCompose({
-    cwd: outputDir,
-    runCommand,
+    cwd: paths.outputDir,
+    runCommand: paths.runCommand,
     args: [
-      ...buildComposeArgs({ composeFile, envFile, profile: "blackbox" }),
+      ...buildComposeArgs({
+        composeFile: paths.composeFile,
+        envFile: paths.envFile,
+        profile: "blackbox",
+      }),
       "up",
       "-d",
       GATEWAY_SERVICE,
@@ -818,29 +1147,36 @@ export async function runKeybaseDockerBlackboxSmoke(
     ],
   });
   await waitForServiceWhoami({
-    composeFile,
-    cwd: outputDir,
-    envFile,
-    runCommand,
+    composeFile: paths.composeFile,
+    cwd: paths.outputDir,
+    envFile: paths.envFile,
+    runCommand: paths.runCommand,
     service: GATEWAY_SERVICE,
-    timeoutMs: 60_000,
+    timeoutMs: 150_000,
   });
-  await waitForServiceWhoami({
-    composeFile,
-    cwd: outputDir,
-    envFile,
-    runCommand,
+  const senderUsername = await waitForServiceWhoami({
+    composeFile: paths.composeFile,
+    cwd: paths.outputDir,
+    envFile: paths.envFile,
+    runCommand: paths.runCommand,
     service: SENDER_SERVICE,
-    timeoutMs: 60_000,
+    timeoutMs: 90_000,
+  });
+  await waitForKeybaseChannelRunning({
+    composeFile: paths.composeFile,
+    cwd: paths.outputDir,
+    envFile: paths.envFile,
+    runCommand: paths.runCommand,
+    timeoutMs: 90_000,
   });
 
   const listResult = await runKeybaseApiInService<{
     conversations?: KeybaseConversationSummary[];
   }>({
-    composeFile,
-    cwd: outputDir,
-    envFile,
-    runCommand,
+    composeFile: paths.composeFile,
+    cwd: paths.outputDir,
+    envFile: paths.envFile,
+    runCommand: paths.runCommand,
     service: SENDER_SERVICE,
     request: {
       method: "list",
@@ -851,25 +1187,36 @@ export async function runKeybaseDockerBlackboxSmoke(
     conversations: listResult.conversations ?? [],
     team,
   });
+  return {
+    ...paths,
+    botUsername,
+    conversationId,
+    senderUsername: normalizeUsername(senderUsername),
+    team,
+  };
+}
 
-  const body =
-    params.message?.trim() || `@${botUsername} reply exactly: keybase blackbox smoke ok ${marker}`;
+async function sendKeybaseBlackboxMessage(params: {
+  body: string;
+  conversation?: KeybaseBlackboxConversation;
+  context: KeybaseBlackboxContext;
+}): Promise<string> {
   const sendResult = await runKeybaseApiInService<{
     id?: number | string | null;
     outbox_id?: string | null;
   }>({
-    composeFile,
-    cwd: outputDir,
-    envFile,
-    runCommand,
+    composeFile: params.context.composeFile,
+    cwd: params.context.outputDir,
+    envFile: params.context.envFile,
+    runCommand: params.context.runCommand,
     service: SENDER_SERVICE,
     request: {
       method: "send",
       params: {
         options: {
-          conversation_id: conversationId,
+          ...(params.conversation ?? { conversation_id: params.context.conversationId }),
           message: {
-            body,
+            body: params.body,
           },
         },
       },
@@ -879,26 +1226,709 @@ export async function runKeybaseDockerBlackboxSmoke(
   if (!sentMessageId) {
     throw new Error("Keybase sender did not return a message id");
   }
+  return sentMessageId;
+}
+
+export async function runKeybaseDockerBlackboxSmoke(
+  params: {
+    botUsername: string;
+    composeFile?: string;
+    envFile?: string;
+    expectedAckReaction?: string | false;
+    message?: string;
+    outputDir: string;
+    team: string;
+    timeoutMs?: number;
+  },
+  deps: {
+    runCommand?: RunCommand;
+  } = {},
+): Promise<KeybaseDockerBlackboxResult> {
+  const timeoutMs = params.timeoutMs ?? 180_000;
+  const startedAt = Date.now();
+  const marker = `keybase-blackbox-${startedAt}`;
+  const context = await prepareKeybaseBlackboxContext({
+    botUsername: params.botUsername,
+    composeFile: params.composeFile,
+    envFile: params.envFile,
+    outputDir: params.outputDir,
+    runCommand: deps.runCommand,
+    team: params.team,
+  });
+
+  const body =
+    params.message?.trim() ||
+    `@${context.botUsername} reply exactly: keybase blackbox smoke ok ${marker}`;
+  const sentMessageId = await sendKeybaseBlackboxMessage({
+    body,
+    context,
+  });
 
   const reply = await waitForBlackboxReply({
-    botUsername,
-    composeFile,
-    conversationId,
-    cwd: outputDir,
-    envFile,
-    runCommand,
+    botUsername: context.botUsername,
+    composeFile: context.composeFile,
+    conversation: { conversation_id: context.conversationId },
+    cwd: context.outputDir,
+    envFile: context.envFile,
+    expectedAckReaction: params.expectedAckReaction ?? DEFAULT_BLACKBOX_ACK_REACTION,
+    runCommand: context.runCommand,
     sentMessageId,
     startedAt,
     timeoutMs,
   });
 
   return {
-    botUsername,
+    ...(reply.ackReactionBody ? { ackReactionBody: reply.ackReactionBody } : {}),
+    ...(reply.ackReactionMessageId ? { ackReactionMessageId: reply.ackReactionMessageId } : {}),
+    botUsername: context.botUsername,
     inboundAt: reply.inboundAt,
     marker,
     outboundAt: reply.outboundAt,
     replyPreview: reply.replyPreview,
     sentMessageId,
-    team,
+    team: context.team,
   };
+}
+
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  return String(error);
+}
+
+type JsonObject = Record<string, unknown>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getOrCreateJsonObject(parent: JsonObject, key: string): JsonObject {
+  const existing = parent[key];
+  if (isJsonObject(existing)) {
+    return existing;
+  }
+  const next: JsonObject = {};
+  parent[key] = next;
+  return next;
+}
+
+async function readJsonObjectFile(filePath: string): Promise<JsonObject> {
+  const raw = JSON.parse(await fs.readFile(filePath, "utf8")) as unknown;
+  if (!isJsonObject(raw)) {
+    throw new Error(`${filePath} did not contain a JSON object`);
+  }
+  return raw;
+}
+
+async function writeJsonObjectFile(filePath: string, value: JsonObject): Promise<void> {
+  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function keybaseConfigPath(outputDir: string): string {
+  return path.join(outputDir, "state", "home", ".openclaw", "openclaw.json");
+}
+
+function keybasePairingStorePath(outputDir: string): string {
+  return path.join(outputDir, "state", "home", ".openclaw", "credentials", "keybase-pairing.json");
+}
+
+async function installBlockedGroupAllowlist(
+  context: KeybaseBlackboxContext,
+): Promise<() => Promise<void>> {
+  const configFile = keybaseConfigPath(context.outputDir);
+  const config = await readJsonObjectFile(configFile);
+  const channels = getOrCreateJsonObject(config, "channels");
+  const keybase = getOrCreateJsonObject(channels, "keybase");
+  const groups = getOrCreateJsonObject(keybase, "groups");
+  const groupKey = `team:${context.team.toLowerCase()}#general`;
+  const hadPrevious = Object.hasOwn(groups, groupKey);
+  const previous = groups[groupKey];
+  const current = isJsonObject(previous) ? { ...previous } : {};
+  groups[groupKey] = {
+    ...current,
+    allowFrom: ["__openclaw_qa_blocked_sender__"],
+    requireMention: true,
+  };
+  await writeJsonObjectFile(configFile, config);
+
+  return async () => {
+    const next = await readJsonObjectFile(configFile);
+    const nextChannels = getOrCreateJsonObject(next, "channels");
+    const nextKeybase = getOrCreateJsonObject(nextChannels, "keybase");
+    const nextGroups = getOrCreateJsonObject(nextKeybase, "groups");
+    if (hadPrevious) {
+      nextGroups[groupKey] = previous;
+    } else {
+      delete nextGroups[groupKey];
+    }
+    await writeJsonObjectFile(configFile, next);
+  };
+}
+
+async function installAllowedGroupSender(
+  context: KeybaseBlackboxContext,
+): Promise<() => Promise<void>> {
+  const configFile = keybaseConfigPath(context.outputDir);
+  const config = await readJsonObjectFile(configFile);
+  const channels = getOrCreateJsonObject(config, "channels");
+  const keybase = getOrCreateJsonObject(channels, "keybase");
+  const groups = getOrCreateJsonObject(keybase, "groups");
+  const groupKey = `team:${context.team.toLowerCase()}#general`;
+  const hadPrevious = Object.hasOwn(groups, groupKey);
+  const previous = groups[groupKey];
+  const current = isJsonObject(previous) ? { ...previous } : {};
+  groups[groupKey] = {
+    ...current,
+    allowFrom: [context.senderUsername],
+    requireMention: true,
+  };
+  await writeJsonObjectFile(configFile, config);
+
+  return async () => {
+    const next = await readJsonObjectFile(configFile);
+    const nextChannels = getOrCreateJsonObject(next, "channels");
+    const nextKeybase = getOrCreateJsonObject(nextChannels, "keybase");
+    const nextGroups = getOrCreateJsonObject(nextKeybase, "groups");
+    if (hadPrevious) {
+      nextGroups[groupKey] = previous;
+    } else {
+      delete nextGroups[groupKey];
+    }
+    await writeJsonObjectFile(configFile, next);
+  };
+}
+
+async function ensureBaseQaConfig(params: { outputDir: string; team: string }): Promise<void> {
+  const configFile = keybaseConfigPath(params.outputDir);
+  await fs.rm(keybasePairingStorePath(params.outputDir), { force: true });
+  const config = await readJsonObjectFile(configFile);
+  const channels = getOrCreateJsonObject(config, "channels");
+  const keybase = getOrCreateJsonObject(channels, "keybase");
+  keybase.dmPolicy = "pairing";
+  keybase.allowFrom = [];
+  const groups = getOrCreateJsonObject(keybase, "groups");
+  const groupKey = `team:${params.team.toLowerCase()}#general`;
+  const current = isJsonObject(groups[groupKey]) ? { ...groups[groupKey] } : {};
+  groups[groupKey] = {
+    ...current,
+    requireMention: true,
+  };
+  await writeJsonObjectFile(configFile, config);
+}
+
+async function installDmPolicy(
+  context: KeybaseBlackboxContext,
+  params: {
+    allowFrom?: string[];
+    dmPolicy: "allowlist" | "pairing";
+  },
+): Promise<() => Promise<void>> {
+  const configFile = keybaseConfigPath(context.outputDir);
+  const config = await readJsonObjectFile(configFile);
+  const channels = getOrCreateJsonObject(config, "channels");
+  const keybase = getOrCreateJsonObject(channels, "keybase");
+  const hadDmPolicy = Object.hasOwn(keybase, "dmPolicy");
+  const previousDmPolicy = keybase.dmPolicy;
+  const hadAllowFrom = Object.hasOwn(keybase, "allowFrom");
+  const previousAllowFrom = keybase.allowFrom;
+  keybase.dmPolicy = params.dmPolicy;
+  keybase.allowFrom = params.allowFrom ?? [];
+  await writeJsonObjectFile(configFile, config);
+
+  return async () => {
+    const next = await readJsonObjectFile(configFile);
+    const nextChannels = getOrCreateJsonObject(next, "channels");
+    const nextKeybase = getOrCreateJsonObject(nextChannels, "keybase");
+    if (hadDmPolicy) {
+      nextKeybase.dmPolicy = previousDmPolicy;
+    } else {
+      delete nextKeybase.dmPolicy;
+    }
+    if (hadAllowFrom) {
+      nextKeybase.allowFrom = previousAllowFrom;
+    } else {
+      delete nextKeybase.allowFrom;
+    }
+    await writeJsonObjectFile(configFile, next);
+  };
+}
+
+async function restartKeybaseGateway(context: KeybaseBlackboxContext): Promise<void> {
+  const restartedAt = Date.now();
+  const composeArgs = buildComposeArgs({
+    composeFile: context.composeFile,
+    envFile: context.envFile,
+    profile: "blackbox",
+  });
+  await runCompose({
+    cwd: context.outputDir,
+    runCommand: context.runCommand,
+    args: [...composeArgs, "stop", GATEWAY_SERVICE],
+  });
+  await runCompose({
+    cwd: context.outputDir,
+    runCommand: context.runCommand,
+    args: [...composeArgs, "rm", "-f", GATEWAY_SERVICE],
+  });
+  await runCompose({
+    cwd: context.outputDir,
+    runCommand: context.runCommand,
+    args: [...composeArgs, "up", "-d", GATEWAY_SERVICE],
+  });
+  await waitForServiceWhoami({
+    composeFile: context.composeFile,
+    cwd: context.outputDir,
+    envFile: context.envFile,
+    runCommand: context.runCommand,
+    service: GATEWAY_SERVICE,
+    timeoutMs: 150_000,
+  });
+  await waitForKeybaseChannelRunning({
+    composeFile: context.composeFile,
+    cwd: context.outputDir,
+    envFile: context.envFile,
+    minLastStartAt: restartedAt,
+    runCommand: context.runCommand,
+    settleMs: 5_000,
+    timeoutMs: 90_000,
+  });
+}
+
+function buildDirectConversation(botUsername: string): KeybaseBlackboxConversation {
+  return {
+    channel: {
+      name: normalizeUsername(botUsername),
+    },
+  };
+}
+
+async function runMentionReplyProbe(params: {
+  context: KeybaseBlackboxContext;
+  expectedAckReaction?: string | false;
+  marker: string;
+  prefix: string;
+  timeoutMs: number;
+}): Promise<Record<string, unknown>> {
+  const startedAt = Date.now();
+  const body = `@${params.context.botUsername} reply exactly: ${params.prefix} ${params.marker}`;
+  const sentMessageId = await sendKeybaseBlackboxMessage({
+    body,
+    context: params.context,
+  });
+  const reply = await waitForBlackboxReply({
+    botUsername: params.context.botUsername,
+    composeFile: params.context.composeFile,
+    conversation: { conversation_id: params.context.conversationId },
+    cwd: params.context.outputDir,
+    envFile: params.context.envFile,
+    expectedAckReaction: params.expectedAckReaction ?? DEFAULT_BLACKBOX_ACK_REACTION,
+    runCommand: params.context.runCommand,
+    sentMessageId,
+    startedAt,
+    timeoutMs: params.timeoutMs,
+  });
+  return {
+    ...(reply.ackReactionBody ? { ackReactionBody: reply.ackReactionBody } : {}),
+    ...(reply.ackReactionMessageId ? { ackReactionMessageId: reply.ackReactionMessageId } : {}),
+    inboundAt: reply.inboundAt,
+    outboundAt: reply.outboundAt,
+    replyPreview: reply.replyPreview,
+    sentMessageId,
+  };
+}
+
+async function runMentionGatingProbe(params: {
+  context: KeybaseBlackboxContext;
+  marker: string;
+  quietMs: number;
+}): Promise<Record<string, unknown>> {
+  const startedAt = Date.now();
+  const sentMessageId = await sendKeybaseBlackboxMessage({
+    body: `keybase mention gate should not reply ${params.marker}`,
+    context: params.context,
+  });
+  await waitForNoBotResponse({
+    botUsername: params.context.botUsername,
+    composeFile: params.context.composeFile,
+    conversation: { conversation_id: params.context.conversationId },
+    cwd: params.context.outputDir,
+    envFile: params.context.envFile,
+    quietMs: params.quietMs,
+    runCommand: params.context.runCommand,
+    sentMessageId,
+    startedAt,
+  });
+  return {
+    quietMs: params.quietMs,
+    sentMessageId,
+  };
+}
+
+async function runHelpCommandProbe(params: {
+  context: KeybaseBlackboxContext;
+  quietMs: number;
+  timeoutMs: number;
+}): Promise<Record<string, unknown>> {
+  const restoreConfig = await installAllowedGroupSender(params.context);
+  try {
+    await restartKeybaseGateway(params.context);
+    const startedAt = Date.now();
+    const sentMessageId = await sendKeybaseBlackboxMessage({
+      body: `@${params.context.botUsername} /help`,
+      context: params.context,
+    });
+    const reply = await waitForBlackboxReply({
+      botUsername: params.context.botUsername,
+      composeFile: params.context.composeFile,
+      conversation: { conversation_id: params.context.conversationId },
+      cwd: params.context.outputDir,
+      envFile: params.context.envFile,
+      expectedAckReaction: DEFAULT_BLACKBOX_ACK_REACTION,
+      runCommand: params.context.runCommand,
+      sentMessageId,
+      startedAt,
+      timeoutMs: params.timeoutMs,
+    });
+    if (!reply.replyBody.includes("/commands for full list")) {
+      throw new Error(`Unexpected /help reply: ${reply.replyBody}`);
+    }
+    await waitForNoAdditionalBotTextReply({
+      allowedReplyMessageId: reply.replyMessageId,
+      botUsername: params.context.botUsername,
+      composeFile: params.context.composeFile,
+      conversation: { conversation_id: params.context.conversationId },
+      cwd: params.context.outputDir,
+      envFile: params.context.envFile,
+      quietMs: params.quietMs,
+      runCommand: params.context.runCommand,
+      sentMessageId,
+      startedAt,
+    });
+    return {
+      ...(reply.ackReactionBody ? { ackReactionBody: reply.ackReactionBody } : {}),
+      ...(reply.ackReactionMessageId ? { ackReactionMessageId: reply.ackReactionMessageId } : {}),
+      inboundAt: reply.inboundAt,
+      outboundAt: reply.outboundAt,
+      replyPreview: reply.replyPreview,
+      sentMessageId,
+    };
+  } finally {
+    await restoreConfig();
+    await restartKeybaseGateway(params.context);
+  }
+}
+
+async function runAllowlistBlockProbe(params: {
+  context: KeybaseBlackboxContext;
+  marker: string;
+  quietMs: number;
+}): Promise<Record<string, unknown>> {
+  const restoreConfig = await installBlockedGroupAllowlist(params.context);
+  try {
+    await restartKeybaseGateway(params.context);
+    const startedAt = Date.now();
+    const sentMessageId = await sendKeybaseBlackboxMessage({
+      body: `@${params.context.botUsername} keybase allowlist block should not reply ${params.marker}`,
+      context: params.context,
+    });
+    await waitForNoBotResponse({
+      botUsername: params.context.botUsername,
+      composeFile: params.context.composeFile,
+      conversation: { conversation_id: params.context.conversationId },
+      cwd: params.context.outputDir,
+      envFile: params.context.envFile,
+      quietMs: params.quietMs,
+      runCommand: params.context.runCommand,
+      sentMessageId,
+      startedAt,
+    });
+    return {
+      quietMs: params.quietMs,
+      sentMessageId,
+    };
+  } finally {
+    await restoreConfig();
+    await restartKeybaseGateway(params.context);
+  }
+}
+
+async function runDirectMessageReplyProbe(params: {
+  context: KeybaseBlackboxContext;
+  marker: string;
+  timeoutMs: number;
+}): Promise<Record<string, unknown>> {
+  const restoreConfig = await installDmPolicy(params.context, {
+    dmPolicy: "allowlist",
+    allowFrom: [params.context.senderUsername],
+  });
+  try {
+    await restartKeybaseGateway(params.context);
+    const conversation = buildDirectConversation(params.context.botUsername);
+    const startedAt = Date.now();
+    const sentMessageId = await sendKeybaseBlackboxMessage({
+      body: `reply exactly: keybase dm canary ok ${params.marker}`,
+      context: params.context,
+      conversation,
+    });
+    const reply = await waitForBlackboxReply({
+      botUsername: params.context.botUsername,
+      composeFile: params.context.composeFile,
+      conversation,
+      cwd: params.context.outputDir,
+      envFile: params.context.envFile,
+      expectedAckReaction: false,
+      runCommand: params.context.runCommand,
+      sentMessageId,
+      startedAt,
+      timeoutMs: params.timeoutMs,
+    });
+    return {
+      ...(reply.ackReactionBody ? { ackReactionBody: reply.ackReactionBody } : {}),
+      ...(reply.ackReactionMessageId ? { ackReactionMessageId: reply.ackReactionMessageId } : {}),
+      inboundAt: reply.inboundAt,
+      outboundAt: reply.outboundAt,
+      replyPreview: reply.replyPreview,
+      senderUsername: params.context.senderUsername,
+      sentMessageId,
+    };
+  } finally {
+    await restoreConfig();
+  }
+}
+
+async function waitForPairingChallengeReply(params: {
+  botUsername: string;
+  composeFile: string;
+  conversation: KeybaseBlackboxConversation;
+  cwd: string;
+  envFile: string;
+  runCommand: RunCommand;
+  sentMessageId: string;
+  startedAt: number;
+  timeoutMs: number;
+}): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + params.timeoutMs;
+  while (Date.now() < deadline) {
+    const messages = await readKeybaseMessagesInSender({
+      composeFile: params.composeFile,
+      conversation: params.conversation,
+      cwd: params.cwd,
+      envFile: params.envFile,
+      runCommand: params.runCommand,
+    });
+    const reply = findBotReplyToMessage({
+      botUsername: params.botUsername,
+      messages,
+      sentMessageId: params.sentMessageId,
+      startedAt: params.startedAt,
+    });
+    const replyBody = reply ? readMessageBody(reply) : "";
+    if (/pairing code:/i.test(replyBody)) {
+      return {
+        replyMessageId: normalizeMessageId(reply?.msg?.id),
+        replyPreview: replyBody.slice(0, 240),
+        sentMessageId: params.sentMessageId,
+      };
+    }
+    await sleep(3000);
+  }
+  throw new Error("Timed out waiting for Keybase DM pairing challenge reply");
+}
+
+async function runDirectMessagePairingProbe(params: {
+  context: KeybaseBlackboxContext;
+  marker: string;
+  timeoutMs: number;
+}): Promise<Record<string, unknown>> {
+  const conversation = buildDirectConversation(params.context.botUsername);
+  const startedAt = Date.now();
+  const sentMessageId = await sendKeybaseBlackboxMessage({
+    body: `keybase dm pairing challenge ${params.marker}`,
+    context: params.context,
+    conversation,
+  });
+  return {
+    ...(await waitForPairingChallengeReply({
+      botUsername: params.context.botUsername,
+      composeFile: params.context.composeFile,
+      conversation,
+      cwd: params.context.outputDir,
+      envFile: params.context.envFile,
+      runCommand: params.context.runCommand,
+      sentMessageId,
+      startedAt,
+      timeoutMs: params.timeoutMs,
+    })),
+    senderUsername: params.context.senderUsername,
+  };
+}
+
+function normalizeKeybaseBlackboxScenarioIds(
+  scenarioIds?: readonly string[],
+): KeybaseDockerBlackboxScenarioId[] {
+  const normalized =
+    scenarioIds && scenarioIds.length > 0 ? scenarioIds : DEFAULT_BLACKBOX_SCENARIOS;
+  const allowed = new Set<KeybaseDockerBlackboxScenarioId>(DEFAULT_BLACKBOX_SCENARIOS);
+  return normalized.map((id) => {
+    if (!allowed.has(id as KeybaseDockerBlackboxScenarioId)) {
+      throw new Error(
+        `Unknown Keybase blackbox scenario "${id}". Supported scenarios: ${[
+          ...DEFAULT_BLACKBOX_SCENARIOS,
+        ].join(", ")}`,
+      );
+    }
+    return id as KeybaseDockerBlackboxScenarioId;
+  });
+}
+
+function renderKeybaseBlackboxSummary(
+  result: Omit<KeybaseDockerBlackboxSuiteResult, "summaryPath">,
+) {
+  const lines = [
+    "# Keybase Blackbox QA",
+    "",
+    `- team: ${result.team}`,
+    `- bot: ${result.botUsername}`,
+    `- passed: ${result.passed}`,
+    `- failed: ${result.failed}`,
+    "",
+    "| Scenario | Status | Details |",
+    "| --- | --- | --- |",
+  ];
+  for (const scenario of result.scenarios) {
+    const details = scenario.error ?? JSON.stringify(scenario.details ?? {});
+    lines.push(`| ${scenario.id} | ${scenario.status} | ${details.replaceAll("|", "\\|")} |`);
+  }
+  lines.push("");
+  return `${lines.join("\n")}\n`;
+}
+
+export async function runKeybaseDockerBlackboxSuite(
+  params: {
+    botUsername: string;
+    composeFile?: string;
+    envFile?: string;
+    negativeWaitMs?: number;
+    outputDir: string;
+    scenarioIds?: readonly string[];
+    team: string;
+    timeoutMs?: number;
+  },
+  deps: {
+    runCommand?: RunCommand;
+  } = {},
+): Promise<KeybaseDockerBlackboxSuiteResult> {
+  const timeoutMs = params.timeoutMs ?? 180_000;
+  const quietMs = params.negativeWaitMs ?? 20_000;
+  const scenarioIds = normalizeKeybaseBlackboxScenarioIds(params.scenarioIds);
+  const context = await prepareKeybaseBlackboxContext({
+    botUsername: params.botUsername,
+    composeFile: params.composeFile,
+    envFile: params.envFile,
+    outputDir: params.outputDir,
+    runCommand: deps.runCommand,
+    team: params.team,
+  });
+  const scenarios: KeybaseDockerBlackboxScenarioResult[] = [];
+
+  for (const id of scenarioIds) {
+    const startedAt = Date.now();
+    try {
+      const marker = `keybase-${id}-${startedAt}`;
+      let details: Record<string, unknown>;
+      switch (id) {
+        case "canary":
+          details = await runMentionReplyProbe({
+            context,
+            marker,
+            prefix: "keybase blackbox canary ok",
+            timeoutMs,
+          });
+          break;
+        case "dm-canary":
+          details = await runDirectMessageReplyProbe({
+            context,
+            marker,
+            timeoutMs,
+          });
+          break;
+        case "dm-pairing":
+          details = await runDirectMessagePairingProbe({
+            context,
+            marker,
+            timeoutMs,
+          });
+          break;
+        case "help-command":
+          details = await runHelpCommandProbe({
+            context,
+            quietMs,
+            timeoutMs,
+          });
+          break;
+        case "mention-gating":
+          details = await runMentionGatingProbe({
+            context,
+            marker,
+            quietMs,
+          });
+          break;
+        case "allowlist-block":
+          details = await runAllowlistBlockProbe({
+            context,
+            marker,
+            quietMs,
+          });
+          break;
+        case "restart-resume":
+          await restartKeybaseGateway(context);
+          details = await runMentionReplyProbe({
+            context,
+            marker,
+            prefix: "keybase restart resume ok",
+            timeoutMs,
+          });
+          break;
+      }
+      scenarios.push({
+        details,
+        finishedAt: Date.now(),
+        id,
+        startedAt,
+        status: "passed",
+      });
+    } catch (error) {
+      scenarios.push({
+        error: formatUnknownError(error),
+        finishedAt: Date.now(),
+        id,
+        startedAt,
+        status: "failed",
+      });
+    }
+  }
+
+  const reportPath = path.join(context.outputDir, "keybase-blackbox-report.json");
+  const summaryPath = path.join(context.outputDir, "keybase-blackbox-summary.md");
+  const passed = scenarios.filter((scenario) => scenario.status === "passed").length;
+  const failed = scenarios.length - passed;
+  const resultWithoutSummaryPath = {
+    botUsername: context.botUsername,
+    failed,
+    passed,
+    reportPath,
+    scenarios,
+    team: context.team,
+  };
+  const result: KeybaseDockerBlackboxSuiteResult = {
+    ...resultWithoutSummaryPath,
+    summaryPath,
+  };
+  await fs.writeFile(reportPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+  await fs.writeFile(summaryPath, renderKeybaseBlackboxSummary(resultWithoutSummaryPath), "utf8");
+  return result;
 }

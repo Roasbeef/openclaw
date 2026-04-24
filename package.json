@@ -1332,6 +1332,7 @@
     "keybase:smoke:blackbox": "node --import tsx scripts/keybase-smoke.ts blackbox",
     "keybase:smoke:build": "node --import tsx scripts/keybase-smoke.ts build",
     "keybase:smoke:scaffold": "node --import tsx scripts/keybase-smoke.ts scaffold",
+    "keybase:smoke:suite": "node --import tsx scripts/keybase-smoke.ts suite",
     "lint": "node scripts/run-oxlint-shards.mjs",
     "lint:agent:ingress-owner": "node scripts/check-ingress-agent-owner-context.mjs",
     "lint:all": "node scripts/run-oxlint.mjs",
