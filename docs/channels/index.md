@@ -19,6 +19,7 @@ Text is supported everywhere; media and reactions vary by channel.
 - [Google Chat](/channels/googlechat) — Google Chat API app via HTTP webhook.
 - [iMessage (legacy)](/channels/imessage) — Legacy macOS integration via imsg CLI (deprecated, use BlueBubbles for new setups).
 - [IRC](/channels/irc) — Classic IRC servers; channels + DMs with pairing/allowlist controls.
+- [Keybase](/channels/keybase) — Keybase chat via the Keybase CLI JSON API; DMs and team chats with pairing and allowlist controls.
 - [LINE](/channels/line) — LINE Messaging API bot (bundled plugin).
 - [Matrix](/channels/matrix) — Matrix protocol (bundled plugin).
 - [Mattermost](/channels/mattermost) — Bot API + WebSocket; channels, groups, DMs (bundled plugin).

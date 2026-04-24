@@ -12,8 +12,8 @@ read_when:
 ## Status
 
 - Phase 0 transport spike is complete in `extensions/keybase`.
-- Phase 1 is in progress.
-- Current phase 1 baseline is implemented locally:
+- Phase 1 is mostly complete.
+- Current phase 1 baseline is implemented and live-blackbox validated locally:
   - bundled plugin scaffold
   - DM ingress
   - team/channel ingress
@@ -22,7 +22,8 @@ read_when:
   - per-group `systemPrompt`
   - per-group `skills`
   - directory and security warning wiring
-- Public docs and product exposure should still wait until the remaining phase 1 gaps are closed.
+  - official docs, channel index, setup visibility, and QA runner exposure
+  - two-container live blackbox QA for group canary, tagged help command, DM canary, pairing, mention gating, allowlist blocking, restart resume, and ack reaction observation
 
 ## Goals
 
@@ -35,7 +36,7 @@ read_when:
 
 - Do not ship a permanent `lbot` bridge layer inside OpenClaw.
 - Do not add Keybase-specific logic to core when the plugin contract can carry it.
-- Do not claim Keybase is supported in public docs or channel pickers until phase 1 is complete.
+- Do not scale a single Keybase identity horizontally; use one identity per running OpenClaw instance.
 
 ## Key Decisions
 
@@ -121,11 +122,10 @@ Current state:
   - per-group `requireMention`, `systemPrompt`, and `skills`
   - initial directory + security warning surfaces
 - Remaining:
-  - docs at `docs/channels/keybase.md`
   - setup UX polish
   - richer doctor coverage
   - outbound edits/reactions/attachments/pins wired through the full channel contract
-  - live QA or transport-smoke lane
+  - deeper live QA for attachments and long-running async/subagent workflows
 
 ## Phase 2
 
@@ -133,9 +133,11 @@ Match fully featured OpenClaw channel flows where Keybase has a clean mapping.
 
 Scope:
 
-- bot command advertisements
+- bot command advertisements (implemented: startup syncs slash command catalog through
+  Keybase `advertisecommands`; `commands.native=false` clears published commands)
 - native or text-fallback approvals
-- better outbound formatting and chunking
+- better outbound formatting and chunking (implemented: default markdown-aware
+  text chunking with `textChunkLimit`)
 - richer directory and resolver behavior
 - stable message and conversation identity mapping
 
@@ -231,6 +233,9 @@ Use a staged validation path instead of jumping straight to a live Keybase bot:
      - `extensions/keybase/src/docker-smoke.ts`
      - `scripts/keybase-smoke.ts`
 4. Live Keybase smoke against a restricted bot and a dedicated test team/channel.
+   - Repeatable lane: `pnpm openclaw qa keybase --output-dir .artifacts/keybase-docker --team lbottest --bot lbottestbot`
+   - The runner installs the requested `team#general` route into the local smoke config before assertions.
+   - Covered contract: team-channel canary reply, tagged help command, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation.
 5. Helm and EKS rollout.
 
 ## Local Smoke Plan
@@ -250,8 +255,13 @@ Before touching EKS:
    - unallowlisted team route ignored
    - follow-up reply lands in the same conversation
 6. After the single-bot path is stable, add a second test identity/container for black-box send/receive validation.
+7. Promote the smoke into the repo QA runner:
+   - `pnpm openclaw qa keybase`
+   - `pnpm keybase:smoke:suite` for the lower-level harness entry point
 
-If we want operator-friendly live transport coverage after that, the right repo-native direction is a real transport QA lane modeled after `openclaw qa matrix` and `openclaw qa telegram`, not a permanent one-off shell script.
+The operator-friendly live transport coverage is now a real transport QA lane
+modeled after `openclaw qa matrix` and `openclaw qa telegram`, not a permanent
+one-off shell script.
 
 ## Open Questions
 

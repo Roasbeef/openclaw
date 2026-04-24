@@ -1,5 +1,5 @@
 ---
-summary: "Experimental Keybase support via the Keybase CLI JSON API"
+summary: "Keybase support via the Keybase CLI JSON API"
 read_when:
   - Working on Keybase channel support
   - Running OpenClaw against Keybase locally or in containers
@@ -9,8 +9,8 @@ title: "Keybase"
 
 # Keybase
 
-Status: experimental bundled plugin in progress. The current implementation supports DMs, team chats, mention-gated group routing, pairing, route allowlists, per-group prompts, and per-group skill filters.
-It also supports best-effort ack reactions on handled messages.
+Keybase is an official bundled channel plugin backed by the Keybase CLI JSON API.
+It supports DMs, team chats, mention-gated group routing, pairing, route allowlists, per-group prompts, per-group skill filters, and best-effort ack reactions on handled messages.
 
 <CardGroup cols={3}>
   <Card title="Pairing" icon="link" href="/channels/pairing">
@@ -64,10 +64,12 @@ Useful fields:
 | `socketFile`                | Optional `keybased` socket path              |
 | `pidFile`                   | Optional `keybased` pid file path            |
 | `binary`                    | Optional `keybase` binary path               |
+| `textChunkLimit`            | Optional outbound text chunk size            |
 | `dmPolicy`                  | DM access policy (`pairing` recommended)     |
 | `allowFrom`                 | DM allowlist                                 |
 | `groupPolicy`               | Group route policy (`allowlist` recommended) |
 | `groups`                    | Team/topic allowlist and per-route overrides |
+| `commands`                  | Native command advertisement settings        |
 | `defaultTo`                 | Optional default outbound target             |
 
 ## Group routing
@@ -110,6 +112,48 @@ Current target forms:
 - `dm:alice,bob`
 - `team:example#lbottest`
 - `conv:<conversation-id>`
+
+## Delivery and chunking
+
+Keybase outbound text uses OpenClaw's markdown-aware chunker with a default
+`textChunkLimit` of `4000` characters. Set `channels.keybase.textChunkLimit` or
+`channels.keybase.accounts.<id>.textChunkLimit` to lower the limit for a
+particular deployment. Agent replies preserve the same Keybase `reply_to`
+target on each text chunk.
+
+## Native command advertisements
+
+Keybase supports bot command advertisements through the CLI JSON API. OpenClaw
+syncs the standard slash command catalog into that menu at gateway startup when
+native commands are enabled.
+
+```json5
+{
+  commands: {
+    native: "auto",
+    nativeSkills: "auto",
+  },
+  channels: {
+    keybase: {
+      commands: {
+        native: "auto",
+        nativeSkills: "auto",
+        alias: "OpenClaw",
+      },
+    },
+  },
+}
+```
+
+Notes:
+
+- `commands.native: "auto"` enables Keybase command advertisements.
+- `channels.keybase.commands.native=false` clears previously published Keybase
+  command advertisements on startup.
+- Advertised command names keep OpenClaw's normal slash form, such as `/help`
+  and `/status`; the regular text-command dispatcher still handles execution.
+- `commands.nativeSkills` controls whether user-invocable skill commands are
+  included in the advertised catalog.
 
 ## Ack reactions
 
@@ -219,4 +263,23 @@ pnpm keybase:smoke:blackbox --output-dir .artifacts/keybase-docker \
 
 The blackbox command starts the gateway and sender containers, sends a mention
 from the sender identity, then waits until OpenClaw records fresh inbound and
-outbound Keybase timestamps and the sender can read the bot reply.
+outbound Keybase timestamps, the sender can read the bot reply, and the sender
+can observe the configured ack reaction.
+
+For the production live transport lane, use the QA runner:
+
+```bash
+pnpm openclaw qa keybase --output-dir .artifacts/keybase-docker \
+  --team lbottest \
+  --bot lbottestbot
+```
+
+The QA lane reuses the same two-container scaffold and writes
+`keybase-blackbox-report.json` plus `keybase-blackbox-summary.md`. It currently
+covers team-channel canary replies, tagged help commands, DM canary replies, DM
+pairing challenges, mention gating, group allowlist block, restart resume, and
+ack reaction observation. The runner installs the requested `team#general` test
+route in the local smoke config before it starts assertions. Use repeated
+`--scenario <id>` flags to run a subset: `canary`, `help-command`,
+`dm-canary`, `dm-pairing`, `mention-gating`, `allowlist-block`, or
+`restart-resume`.

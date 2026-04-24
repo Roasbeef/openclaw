@@ -1,6 +1,14 @@
 {
   "id": "keybase",
+  "name": "Keybase",
+  "description": "Keybase channel plugin",
   "channels": ["keybase"],
+  "qaRunners": [
+    {
+      "commandName": "keybase",
+      "description": "Run the Docker-backed Keybase live QA lane against local bot and sender containers"
+    }
+  ],
   "channelEnvVars": {
     "keybase": [
       "KEYBASE_BINARY",

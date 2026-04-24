@@ -23,11 +23,6 @@
       "systemImage": "key.horizontal",
       "markdownCapable": true,
       "order": 73,
-      "exposure": {
-        "configured": false,
-        "setup": false,
-        "docs": false
-      },
       "cliAddOptions": [
         {
           "flags": "--keybase-home <dir>",

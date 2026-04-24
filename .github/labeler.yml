@@ -84,6 +84,7 @@
   - changed-files:
       - any-glob-to-any-file:
           - "extensions/keybase/**"
+          - "docs/channels/keybase.md"
           - "docs/plan/keybase-channel.md"
 "channel: slack":
   - changed-files:

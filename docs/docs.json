@@ -1023,6 +1023,7 @@
                   "channels/googlechat",
                   "channels/imessage",
                   "channels/irc",
+                  "channels/keybase",
                   "channels/line",
                   "channels/matrix",
                   "channels/matrix-push-rules",
