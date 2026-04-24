@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const DEFAULT_KEYBASE_BINARY = "keybase";
 const DEFAULT_KEYBASE_HOME = "/home/node";
+const DEFAULT_KEYBASE_RUNTIME_DIR = "/tmp/openclaw-keybase";
 const DEFAULT_CONFIG_PATH = "/home/node/.openclaw/openclaw.json";
 
 function normalizeOptionalString(value) {
@@ -41,6 +42,8 @@ function isRecord(value) {
 
 function resolveKeybaseContainerConfig(env = process.env) {
   const configPath = normalizeOptionalString(env.OPENCLAW_CONFIG_PATH) ?? DEFAULT_CONFIG_PATH;
+  const runtimeDir =
+    normalizeOptionalString(env.OPENCLAW_KEYBASE_RUNTIME_DIR) ?? DEFAULT_KEYBASE_RUNTIME_DIR;
   return {
     autoOneshot: isTruthy(env.OPENCLAW_KEYBASE_AUTO_ONESHOT, true),
     binary: normalizeOptionalString(env.OPENCLAW_KEYBASE_BINARY) ?? DEFAULT_KEYBASE_BINARY,
@@ -48,6 +51,13 @@ function resolveKeybaseContainerConfig(env = process.env) {
     homeDir: normalizeOptionalString(env.OPENCLAW_KEYBASE_HOME) ?? DEFAULT_KEYBASE_HOME,
     paperKey: normalizeOptionalString(env.KEYBASE_PAPERKEY),
     paperKeyFile: normalizeOptionalString(env.KEYBASE_PAPERKEY_FILE),
+    pidFile:
+      normalizeOptionalString(env.OPENCLAW_KEYBASE_PID_FILE) ??
+      path.join(runtimeDir, "keybased.pid"),
+    runtimeDir,
+    socketFile:
+      normalizeOptionalString(env.OPENCLAW_KEYBASE_SOCKET_FILE) ??
+      path.join(runtimeDir, "keybased.sock"),
     tmpDir:
       normalizeOptionalString(env.OPENCLAW_TMPDIR) ??
       normalizeOptionalString(env.TMPDIR) ??
@@ -72,6 +82,8 @@ function applyKeybaseContainerConfig(existing, resolved) {
   }
   channel.binary = resolved.binary;
   channel.homeDir = resolved.homeDir;
+  channel.pidFile = resolved.pidFile;
+  channel.socketFile = resolved.socketFile;
   if (resolved.username) {
     channel.username = resolved.username;
   }
@@ -124,20 +136,63 @@ async function resolvePaperKey(resolved) {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-async function runCommand(command, args, env) {
+function buildKeybaseBaseArgs(resolved) {
+  const args = [];
+  const addPathFlag = (flag, value) => {
+    const normalized = normalizeOptionalString(value);
+    if (normalized) {
+      args.push(flag, normalized);
+    }
+  };
+  addPathFlag("--home", resolved.homeDir);
+  addPathFlag("--socket-file", resolved.socketFile);
+  addPathFlag("--pid-file", resolved.pidFile);
+  return args;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForKeybaseSocket(resolved, getEarlyExitError) {
+  const socketPath = resolved.socketFile;
+  const deadline = Date.now() + 30_000;
+  let lastError;
+  while (Date.now() < deadline) {
+    const earlyExitError = getEarlyExitError();
+    if (earlyExitError) {
+      throw earlyExitError;
+    }
+    try {
+      await stat(socketPath);
+      return;
+    } catch (error) {
+      lastError = error;
+      await sleep(100);
+    }
+  }
+  throw new Error(`Keybase service socket did not appear at ${socketPath}: ${String(lastError)}`);
+}
+
+async function runKeybaseCommand(command, args, env) {
   await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       env,
-      stdio: "inherit",
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
     });
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       if (signal) {
-        reject(new Error(`Command ${command} exited with signal ${signal}`));
+        reject(new Error(`Command ${command} exited with signal ${signal}: ${stderr}`));
         return;
       }
       if (typeof code === "number" && code !== 0) {
-        reject(new Error(`Command ${command} exited with status ${code}`));
+        reject(new Error(`Command ${command} exited with status ${code}: ${stderr}`));
         return;
       }
       resolve();
@@ -145,13 +200,84 @@ async function runCommand(command, args, env) {
   });
 }
 
-function buildKeybaseBaseArgs(resolved) {
-  return resolved.homeDir ? ["--home", resolved.homeDir] : [];
+async function startKeybaseService(resolved, paperKey) {
+  const env = {
+    ...process.env,
+    KEYBASE_SERVICE: normalizeOptionalString(process.env.KEYBASE_SERVICE) ?? "1",
+    TMPDIR: normalizeOptionalString(process.env.TMPDIR) ?? resolved.tmpDir,
+  };
+  const args = [
+    ...buildKeybaseBaseArgs(resolved),
+    "service",
+    "--oneshot-username",
+    resolved.username,
+  ];
+  const child = spawn(resolved.binary, args, {
+    env,
+    stdio: ["pipe", "ignore", "pipe"],
+  });
+
+  if (!child.stdin) {
+    throw new Error("Keybase service child process did not expose stdin");
+  }
+
+  let stderr = "";
+  let ready = false;
+  let earlyExitError;
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  child.once("exit", (code, signal) => {
+    if (!ready) {
+      const reason = signal ? `signal ${signal}` : `status ${code}`;
+      earlyExitError = new Error(`Keybase service exited before readiness (${reason}): ${stderr}`);
+    }
+  });
+  child.stdin.end(`${paperKey.trim()}\n`);
+
+  await waitForKeybaseSocket(resolved, () => earlyExitError);
+
+  const deadline = Date.now() + 30_000;
+  let lastError;
+  while (Date.now() < deadline) {
+    if (earlyExitError) {
+      throw earlyExitError;
+    }
+    try {
+      await runKeybaseCommand(
+        resolved.binary,
+        [
+          ...buildKeybaseBaseArgs(resolved),
+          "chat",
+          "notification-settings",
+          "-disable-typing=true",
+        ],
+        env,
+      );
+      ready = true;
+      return;
+    } catch (error) {
+      lastError = error;
+      if (earlyExitError) {
+        throw earlyExitError;
+      }
+      await sleep(250);
+    }
+  }
+
+  if (!child.killed) {
+    child.kill();
+  }
+  throw new Error(`Keybase service did not become ready: ${String(lastError)}`);
 }
 
 async function prepareKeybaseContainer(resolved) {
   await mkdir(path.dirname(resolved.configPath), { recursive: true });
   await mkdir(resolved.homeDir, { recursive: true });
+  await mkdir(resolved.runtimeDir, { recursive: true });
+  await mkdir(path.dirname(resolved.pidFile), { recursive: true });
+  await mkdir(path.dirname(resolved.socketFile), { recursive: true });
   await mkdir(resolved.tmpDir, { recursive: true });
 
   const nextConfig = applyKeybaseContainerConfig(
@@ -165,13 +291,7 @@ async function prepareKeybaseContainer(resolved) {
     return;
   }
 
-  await runCommand(resolved.binary, [...buildKeybaseBaseArgs(resolved), "oneshot"], {
-    ...process.env,
-    KEYBASE_PAPERKEY: paperKey,
-    KEYBASE_SERVICE: normalizeOptionalString(process.env.KEYBASE_SERVICE) ?? "1",
-    KEYBASE_USERNAME: resolved.username,
-    TMPDIR: normalizeOptionalString(process.env.TMPDIR) ?? resolved.tmpDir,
-  });
+  await startKeybaseService(resolved, paperKey);
 }
 
 async function main(argv = process.argv.slice(2)) {

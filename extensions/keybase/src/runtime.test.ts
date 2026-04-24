@@ -15,6 +15,8 @@ const account: ResolvedKeybaseAccount = {
   groupPolicy: "allowlist",
   groups: {},
   homeDir: "/tmp/keybase-home",
+  pidFile: "/tmp/keybase.pid",
+  socketFile: "/tmp/keybase.sock",
   username: "openclaw-bot",
   paperKey: "paper key words",
 };
@@ -48,6 +50,8 @@ describe("Keybase runtime helpers", () => {
       {
         binary: "keybase",
         homeDir: "/tmp/keybase-home",
+        pidFile: "/tmp/keybase.pid",
+        socketFile: "/tmp/keybase.sock",
       },
     );
     expect(apiRequest).toHaveBeenCalledWith(
@@ -62,6 +66,8 @@ describe("Keybase runtime helpers", () => {
       {
         binary: "keybase",
         homeDir: "/tmp/keybase-home",
+        pidFile: "/tmp/keybase.pid",
+        socketFile: "/tmp/keybase.sock",
       },
     );
   });

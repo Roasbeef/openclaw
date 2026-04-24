@@ -35,6 +35,8 @@ function buildPreparedAccountKey(account: ResolvedKeybaseAccount): string {
   return [
     account.binary,
     account.homeDir ?? "",
+    account.socketFile ?? "",
+    account.pidFile ?? "",
     account.username ?? "",
     account.paperKey ?? "",
     account.paperKeyFile ?? "",
@@ -46,6 +48,8 @@ function resolveCliOptions(account: ResolvedKeybaseAccount) {
   return {
     binary: account.binary,
     ...(account.homeDir ? { homeDir: account.homeDir } : {}),
+    ...(account.socketFile ? { socketFile: account.socketFile } : {}),
+    ...(account.pidFile ? { pidFile: account.pidFile } : {}),
   };
 }
 

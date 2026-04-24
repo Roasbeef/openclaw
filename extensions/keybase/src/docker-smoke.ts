@@ -31,6 +31,9 @@ const DEFAULT_GATEWAY_PORT = 18789;
 const DEFAULT_IMAGE_NAME = "openclaw:keybase-local";
 const DEFAULT_BASE_IMAGE_NAME = "openclaw:keybase-base-local";
 const DEFAULT_KEYBASE_HOME = "/home/node";
+const DEFAULT_KEYBASE_RUNTIME_DIR = "/tmp/openclaw-keybase";
+const DEFAULT_KEYBASE_PID_FILE = `${DEFAULT_KEYBASE_RUNTIME_DIR}/keybased.pid`;
+const DEFAULT_KEYBASE_SOCKET_FILE = `${DEFAULT_KEYBASE_RUNTIME_DIR}/keybased.sock`;
 const DEFAULT_OPENCLAW_HOME = "/home/node/.openclaw";
 const DEFAULT_OPENCLAW_TMPDIR = `${DEFAULT_OPENCLAW_HOME}/tmp`;
 const DEFAULT_PLATFORM = "linux/amd64";
@@ -55,6 +58,9 @@ function renderCompose(params: { gatewayPort: number; imageName: string; platfor
       OPENCLAW_KEYBASE_AUTO_ONESHOT: \${OPENCLAW_KEYBASE_AUTO_ONESHOT:-1}
       OPENCLAW_KEYBASE_BINARY: keybase
       OPENCLAW_KEYBASE_HOME: ${DEFAULT_KEYBASE_HOME}
+      OPENCLAW_KEYBASE_PID_FILE: ${DEFAULT_KEYBASE_PID_FILE}
+      OPENCLAW_KEYBASE_RUNTIME_DIR: ${DEFAULT_KEYBASE_RUNTIME_DIR}
+      OPENCLAW_KEYBASE_SOCKET_FILE: ${DEFAULT_KEYBASE_SOCKET_FILE}
       OPENCLAW_TMPDIR: ${DEFAULT_OPENCLAW_TMPDIR}
       OPENCLAW_TZ: \${OPENCLAW_TZ:-UTC}
       TMPDIR: ${DEFAULT_OPENCLAW_TMPDIR}
@@ -104,6 +110,9 @@ function renderCompose(params: { gatewayPort: number; imageName: string; platfor
       OPENCLAW_CONFIG_PATH: ${DEFAULT_OPENCLAW_HOME}/openclaw.json
       OPENCLAW_KEYBASE_BINARY: keybase
       OPENCLAW_KEYBASE_HOME: ${DEFAULT_KEYBASE_HOME}
+      OPENCLAW_KEYBASE_PID_FILE: ${DEFAULT_KEYBASE_PID_FILE}
+      OPENCLAW_KEYBASE_RUNTIME_DIR: ${DEFAULT_KEYBASE_RUNTIME_DIR}
+      OPENCLAW_KEYBASE_SOCKET_FILE: ${DEFAULT_KEYBASE_SOCKET_FILE}
       OPENCLAW_TMPDIR: ${DEFAULT_OPENCLAW_TMPDIR}
       OPENCLAW_TZ: \${OPENCLAW_TZ:-UTC}
       TMPDIR: ${DEFAULT_OPENCLAW_TMPDIR}
@@ -167,13 +176,13 @@ Generated scaffold for a local Keybase-backed OpenClaw smoke run.
 7. Use the CLI sidecar for follow-up config or inspection:
    - \`docker compose --env-file .env -f ${params.composeFileName} up -d openclaw-keybase-cli\`
    - \`docker compose --env-file .env -f ${params.composeFileName} exec openclaw-keybase-cli channels status\`
-   - \`docker compose --env-file .env -f ${params.composeFileName} exec openclaw-keybase-gateway keybase whoami\`
+   - \`docker compose --env-file .env -f ${params.composeFileName} exec openclaw-keybase-gateway keybase --home /home/node --socket-file ${DEFAULT_KEYBASE_SOCKET_FILE} whoami\`
 
 ## Notes
 
 - The smoke image defaults to \`${params.platform}\` because the official Keybase Linux package is amd64-focused.
 - The generated \`state/home/.openclaw/openclaw.json\` sets the default model to \`claude-cli/claude-sonnet-4-6\` and preserves \`CLAUDE_CODE_OAUTH_TOKEN\` for the Claude child process.
-- The shared \`state/home\` mount matches the working \`lbot\` home layout more closely than a split Keybase subdirectory.
+- Keybase persists its home under the shared \`state/home\` mount, but the service socket and pid file stay on container-local \`${DEFAULT_KEYBASE_RUNTIME_DIR}\` so Docker Desktop shared volumes do not need to carry Unix sockets.
 - Start with one bot container and a real external sender. Add a second sender identity/container after the bot-side path is stable.
 `;
 }
@@ -208,6 +217,8 @@ function renderOpenClawConfig() {
           enabled: true,
           groupPolicy: "allowlist",
           homeDir: DEFAULT_KEYBASE_HOME,
+          pidFile: DEFAULT_KEYBASE_PID_FILE,
+          socketFile: DEFAULT_KEYBASE_SOCKET_FILE,
         },
       },
       gateway: {

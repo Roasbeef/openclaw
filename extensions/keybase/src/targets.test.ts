@@ -27,6 +27,13 @@ describe("Keybase target parsing", () => {
       chatType: "group",
       normalized: "team:lightninglabs#ops",
     });
+    expect(parseKeybaseTarget("team:lbottest")).toEqual({
+      raw: "team:lbottest",
+      teamName: "lbottest",
+      topicName: "general",
+      chatType: "group",
+      normalized: "team:lbottest#general",
+    });
     expect(inferKeybaseTargetChatType("lightninglabs#ops")).toBe("group");
   });
 
@@ -48,6 +55,12 @@ describe("Keybase target parsing", () => {
         topicName: "ops",
       },
     });
+    expect(resolveKeybaseConversationRef("team:lbottest#general")).toEqual({
+      channel: {
+        name: "lbottest",
+        membersType: "team",
+      },
+    });
     expect(resolveKeybaseConversationRef("dm:alice,bob")).toEqual({
       channel: {
         name: "alice,bob",
@@ -67,6 +80,7 @@ describe("Keybase target parsing", () => {
   it("canonicalizes group routing keys separately from outbound targets", () => {
     expect(buildKeybaseGroupTarget("LightningLabs", "Ops")).toBe("team:LightningLabs#Ops");
     expect(normalizeKeybaseGroupKey("team:LightningLabs#Ops")).toBe("team:lightninglabs#ops");
+    expect(normalizeKeybaseGroupKey("team:LightningLabs")).toBe("team:lightninglabs#general");
     expect(
       buildKeybaseInboundGroupId({
         channel: {
@@ -75,5 +89,13 @@ describe("Keybase target parsing", () => {
         },
       }),
     ).toBe("team:LightningLabs#Ops");
+    expect(
+      buildKeybaseInboundGroupId({
+        channel: {
+          membersType: "team",
+          name: "LightningLabs",
+        },
+      }),
+    ).toBe("team:LightningLabs#general");
   });
 });

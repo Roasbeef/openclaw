@@ -28,7 +28,8 @@ Status: experimental bundled plugin in progress. The current implementation supp
 - The `keybase` CLI must be installed on the same host where the gateway runs.
 - The Keybase service must be available to that CLI.
 - The OpenClaw instance should use one Keybase identity only.
-- For containers, prefer an entrypoint that runs `keybase oneshot` before `openclaw gateway run`.
+- For containers, prefer an entrypoint that runs the verified service bootstrap before `openclaw gateway run`, for example `keybase service --oneshot-username <bot> < paper_key.txt`.
+- On Docker Desktop/macOS, keep `socketFile` and `pidFile` on a container-local filesystem such as `/tmp/openclaw-keybase`; Unix sockets under bind-mounted host volumes may not be visible to later CLI calls.
 
 ## Minimal config
 
@@ -56,8 +57,10 @@ Useful fields:
 | Field                       | Meaning                                      |
 | --------------------------- | -------------------------------------------- |
 | `username`                  | Keybase bot username                         |
-| `paperKey` / `paperKeyFile` | Paper key for `keybase oneshot`              |
+| `paperKey` / `paperKeyFile` | Paper key for the Keybase service bootstrap  |
 | `homeDir`                   | Optional Keybase home override               |
+| `socketFile`                | Optional `keybased` socket path              |
+| `pidFile`                   | Optional `keybased` pid file path            |
 | `binary`                    | Optional `keybase` binary path               |
 | `dmPolicy`                  | DM access policy (`pairing` recommended)     |
 | `allowFrom`                 | DM allowlist                                 |
@@ -124,8 +127,13 @@ For a containerized Keybase bot, keep the startup model simple:
 1. Mount OpenClaw state.
 2. Mount Keybase home or service state.
 3. Inject `KEYBASE_USERNAME` and paper key.
-4. Run `keybase oneshot`.
+4. Run the Keybase service bootstrap, for example `keybase service --oneshot-username <bot> < paper_key.txt`.
 5. Start `openclaw gateway run`.
+
+If the Keybase home is bind-mounted from macOS into Docker, configure
+`socketFile` and `pidFile` under a container-local path and pass the same
+`--socket-file`/`--pid-file` flags to the service bootstrap. The local smoke
+harness defaults to `/tmp/openclaw-keybase/keybased.sock`.
 
 Do not run one Keybase identity behind multiple replicas.
 
@@ -151,7 +159,10 @@ Notes:
   provider auth.
 - The gateway container uses `/app/extensions/keybase/docker/container-entrypoint.mjs`
   to sync the local Keybase baseline into `state/home/.openclaw/openclaw.json`, run
-  `keybase oneshot`, and then start the gateway.
+  the verified service bootstrap with the mounted paper key, and then start the gateway.
+- The smoke harness persists the Keybase home under `state/home`, but keeps the
+  service socket and pid file under container-local `/tmp/openclaw-keybase` to
+  avoid Docker Desktop shared-volume Unix socket issues.
 - Set `CLAUDE_CODE_OAUTH_TOKEN` in `.env` from `claude setup-token` so the
   Claude child process can authenticate inside the container.
 - For local paper key reuse, either export `KEYBASE_PAPERKEY="$(< /path/to/paper_key.txt)"`

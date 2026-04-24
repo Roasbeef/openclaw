@@ -38,5 +38,7 @@ export interface ResolvedKeybaseAccount {
   name?: string;
   paperKey?: string;
   paperKeyFile?: string;
+  pidFile?: string;
+  socketFile?: string;
   username?: string;
 }

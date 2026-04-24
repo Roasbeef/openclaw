@@ -34,7 +34,9 @@ export interface KeybaseCliTransportOptions {
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
   maxBuffer?: number;
+  pidFile?: string;
   runCommand?: KeybaseCommandRunner;
+  socketFile?: string;
   spawnCommand?: typeof spawn;
   timeoutMs?: number;
 }
@@ -142,18 +144,29 @@ function isKeybaseSocketBootstrapError(stderr: string): boolean {
 }
 
 export function buildKeybaseBaseArgs(
-  options: Pick<KeybaseCliTransportOptions, "homeDir"> = {},
+  options: Pick<KeybaseCliTransportOptions, "homeDir" | "pidFile" | "socketFile"> = {},
 ): string[] {
+  const args: string[] = [];
+  const addPathFlag = (flag: string, value: string | undefined) => {
+    const normalized = typeof value === "string" && value.trim().length > 0 ? value.trim() : "";
+    if (normalized) {
+      args.push(flag, normalized);
+    }
+  };
+
   const homeDir =
     typeof options.homeDir === "string" && options.homeDir.trim().length > 0
       ? options.homeDir.trim()
       : undefined;
-  return homeDir ? ["--home", homeDir] : [];
+  addPathFlag("--home", homeDir);
+  addPathFlag("--socket-file", options.socketFile);
+  addPathFlag("--pid-file", options.pidFile);
+  return args;
 }
 
 export function buildKeybaseApiArgs(
   request: KeybaseApiRequest,
-  options: Pick<KeybaseCliTransportOptions, "homeDir"> = {},
+  options: Pick<KeybaseCliTransportOptions, "homeDir" | "pidFile" | "socketFile"> = {},
 ): string[] {
   return [
     ...buildKeybaseBaseArgs(options),
@@ -166,7 +179,7 @@ export function buildKeybaseApiArgs(
 
 export function buildKeybaseApiListenArgs(
   listen: KeybaseApiListenOptions = {},
-  options: Pick<KeybaseCliTransportOptions, "homeDir"> = {},
+  options: Pick<KeybaseCliTransportOptions, "homeDir" | "pidFile" | "socketFile"> = {},
 ): string[] {
   const args = [...buildKeybaseBaseArgs(options), "chat", "api-listen"];
   if (listen.local) {
@@ -200,7 +213,7 @@ export function buildKeybaseNotificationSettingsArgs(
   params: {
     enableTyping: boolean;
   },
-  options: Pick<KeybaseCliTransportOptions, "homeDir"> = {},
+  options: Pick<KeybaseCliTransportOptions, "homeDir" | "pidFile" | "socketFile"> = {},
 ): string[] {
   return [
     ...buildKeybaseBaseArgs(options),
@@ -211,9 +224,17 @@ export function buildKeybaseNotificationSettingsArgs(
 }
 
 export function buildKeybaseOneshotArgs(
-  options: Pick<KeybaseCliTransportOptions, "homeDir"> = {},
+  params: {
+    username: string;
+  },
+  options: Pick<KeybaseCliTransportOptions, "homeDir" | "pidFile" | "socketFile"> = {},
 ): string[] {
-  return [...buildKeybaseBaseArgs(options), "oneshot"];
+  return [
+    ...buildKeybaseBaseArgs(options),
+    "service",
+    "--oneshot-username",
+    params.username.trim(),
+  ];
 }
 
 export async function keybaseApiRequest<TResult>(
@@ -254,15 +275,137 @@ export async function keybaseOneshot(
   },
   options: KeybaseCliTransportOptions = {},
 ): Promise<void> {
+  const spawnCommand = options.spawnCommand ?? spawn;
   const runCommand = options.runCommand ?? defaultRunCommand;
-  await runCommand(resolveBinary(options), buildKeybaseOneshotArgs(options), {
-    env: {
-      ...options.env,
-      KEYBASE_PAPERKEY: params.paperKey,
-      KEYBASE_USERNAME: params.username,
-    },
-    maxBuffer: options.maxBuffer,
-    timeoutMs: options.timeoutMs,
+  const command = resolveBinary(options);
+  const args = buildKeybaseOneshotArgs(params, options);
+  const commandEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...options.env,
+    KEYBASE_SERVICE: options.env?.KEYBASE_SERVICE ?? process.env.KEYBASE_SERVICE ?? "1",
+  };
+  const startupTimeoutMs = options.timeoutMs ?? 30_000;
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawnCommand(command, args, {
+      env: commandEnv,
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+
+    if (!child.stdin || !child.stderr) {
+      reject(new Error("Keybase oneshot child process did not expose stdio"));
+      return;
+    }
+
+    let stderr = "";
+    let settled = false;
+    let ready = false;
+    let retryTimer: NodeJS.Timeout | undefined;
+    let timeout: NodeJS.Timeout | undefined;
+
+    const finish = (error?: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+      }
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    };
+
+    const scheduleReadinessCheck = () => {
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        void checkReady();
+      }, 250);
+    };
+
+    const checkReady = async () => {
+      if (settled) {
+        return;
+      }
+      try {
+        await runCommand(
+          command,
+          buildKeybaseNotificationSettingsArgs({ enableTyping: false }, options),
+          {
+            env: commandEnv,
+            maxBuffer: options.maxBuffer,
+            timeoutMs: Math.min(startupTimeoutMs, 1_000),
+          },
+        );
+        ready = true;
+        finish();
+      } catch {
+        scheduleReadinessCheck();
+      }
+    };
+
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string | Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.once("error", (error) => {
+      finish(
+        new KeybaseCliCommandError({
+          args,
+          cause: error,
+          command,
+          message: `Keybase command failed: ${command} ${args.join(" ")}`,
+          stderr,
+        }),
+      );
+    });
+    child.once("close", (code, signal) => {
+      if (ready) {
+        return;
+      }
+      if (signal) {
+        finish(
+          new KeybaseCliCommandError({
+            args,
+            command,
+            message: `Keybase command failed: ${command} ${args.join(" ")} (signal ${signal})`,
+            stderr,
+          }),
+        );
+        return;
+      }
+      finish(
+        new KeybaseCliCommandError({
+          args,
+          command,
+          message: `Keybase command exited before the service became ready: ${command} ${args.join(" ")}`,
+          stderr,
+          stdout: typeof code === "number" ? `exit=${code}` : undefined,
+        }),
+      );
+    });
+
+    timeout = setTimeout(() => {
+      if (!child.killed) {
+        child.kill();
+      }
+      finish(
+        new KeybaseCliCommandError({
+          args,
+          command,
+          message: `Keybase command timed out before the service became ready: ${command} ${args.join(" ")}`,
+          stderr,
+        }),
+      );
+    }, startupTimeoutMs);
+
+    child.stdin.end(`${params.paperKey.trim()}\n`);
+    void checkReady();
   });
 }
 

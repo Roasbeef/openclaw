@@ -47,6 +47,7 @@ describe("writeKeybaseDockerSmokeFiles", () => {
     expect(compose).toContain("KEYBASE_USERNAME: ${KEYBASE_USERNAME:-}");
     expect(compose).toContain("KEYBASE_PAPERKEY_FILE: ${KEYBASE_PAPERKEY_FILE:-}");
     expect(compose).toContain("OPENCLAW_KEYBASE_HOME: /home/node");
+    expect(compose).toContain("OPENCLAW_KEYBASE_SOCKET_FILE: /tmp/openclaw-keybase/keybased.sock");
     expect(compose).toContain("OPENCLAW_TMPDIR: /home/node/.openclaw/tmp");
     expect(compose).toContain("TMPDIR: /home/node/.openclaw/tmp");
     expect(compose).toContain("./state/home:/home/node");
@@ -69,6 +70,7 @@ describe("writeKeybaseDockerSmokeFiles", () => {
     expect(config).toContain('"claude-cli/claude-sonnet-4-6"');
     expect(config).toContain('"CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}"');
     expect(config).toContain('"keybase"');
+    expect(config).toContain('"/tmp/openclaw-keybase/keybased.sock"');
     expect(config).toContain('"allowInsecureAuth": true');
     expect(config).toContain('"controlUi"');
     expect(config).toContain('"/home/node"');
@@ -76,6 +78,7 @@ describe("writeKeybaseDockerSmokeFiles", () => {
     const readme = await readFile(path.join(outputDir, "README.md"), "utf8");
     expect(readme).toContain("pnpm keybase:smoke:build");
     expect(readme).toContain("docker compose --env-file .env -f docker-compose.keybase.yml up -d");
+    expect(readme).toContain("--socket-file /tmp/openclaw-keybase/keybased.sock");
     expect(readme).toContain("openclaw-keybase-cli");
   });
 });

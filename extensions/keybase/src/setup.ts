@@ -14,7 +14,15 @@ export function applyKeybaseSetup(params: {
     params.accountId === DEFAULT_ACCOUNT_ID ? { ...section } : { ...accounts[params.accountId] };
 
   const assignString = (
-    key: "binary" | "defaultTo" | "homeDir" | "paperKey" | "paperKeyFile" | "username",
+    key:
+      | "binary"
+      | "defaultTo"
+      | "homeDir"
+      | "paperKey"
+      | "paperKeyFile"
+      | "pidFile"
+      | "socketFile"
+      | "username",
     inputKey: string,
   ) => {
     const value = params.input[inputKey];
@@ -28,6 +36,8 @@ export function applyKeybaseSetup(params: {
   assignString("username", "username");
   assignString("paperKey", "paperKey");
   assignString("paperKeyFile", "paperKeyFile");
+  assignString("pidFile", "pidFile");
+  assignString("socketFile", "socketFile");
   assignString("defaultTo", "defaultTo");
 
   if (typeof params.input.enableTyping === "boolean") {

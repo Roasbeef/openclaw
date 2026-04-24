@@ -26,6 +26,18 @@ function createListenChild() {
   return new MockListenChild() as unknown as ReturnType<typeof startKeybaseApiListen>["child"];
 }
 
+class MockOneshotChild extends EventEmitter {
+  readonly stdin = new PassThrough();
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  killed = false;
+
+  kill() {
+    this.killed = true;
+    return true;
+  }
+}
+
 describe("Keybase CLI transport", () => {
   it("runs chat api requests without shell interpolation", async () => {
     const runCommand = vi.fn().mockResolvedValue({
@@ -41,7 +53,9 @@ describe("Keybase CLI transport", () => {
       {
         binary: "/usr/local/bin/keybase",
         homeDir: "/tmp/keybase-home",
+        pidFile: "/tmp/keybase.pid",
         runCommand,
+        socketFile: "/tmp/keybase.sock",
       },
     );
 
@@ -51,6 +65,10 @@ describe("Keybase CLI transport", () => {
       [
         "--home",
         "/tmp/keybase-home",
+        "--socket-file",
+        "/tmp/keybase.sock",
+        "--pid-file",
+        "/tmp/keybase.pid",
         "chat",
         "api",
         "-m",
@@ -72,11 +90,19 @@ describe("Keybase CLI transport", () => {
           convs: true,
           filterChannels: [buildKeybaseTeamChannel("lightninglabs", "ops"), { name: "alice,bob" }],
         },
-        { homeDir: "/tmp/keybase-home" },
+        {
+          homeDir: "/tmp/keybase-home",
+          pidFile: "/tmp/keybase.pid",
+          socketFile: "/tmp/keybase.sock",
+        },
       ),
     ).toEqual([
       "--home",
       "/tmp/keybase-home",
+      "--socket-file",
+      "/tmp/keybase.sock",
+      "--pid-file",
+      "/tmp/keybase.pid",
       "chat",
       "api-listen",
       "--local",
@@ -92,11 +118,19 @@ describe("Keybase CLI transport", () => {
         {
           enableTyping: true,
         },
-        { homeDir: "/tmp/keybase-home" },
+        {
+          homeDir: "/tmp/keybase-home",
+          pidFile: "/tmp/keybase.pid",
+          socketFile: "/tmp/keybase.sock",
+        },
       ),
     ).toEqual([
       "--home",
       "/tmp/keybase-home",
+      "--socket-file",
+      "/tmp/keybase.sock",
+      "--pid-file",
+      "/tmp/keybase.pid",
       "chat",
       "notification-settings",
       "-disable-typing=false",
@@ -104,20 +138,39 @@ describe("Keybase CLI transport", () => {
   });
 
   it("builds oneshot args without putting credentials on the command line", () => {
-    expect(buildKeybaseOneshotArgs({ homeDir: "/tmp/keybase-home" })).toEqual([
+    expect(
+      buildKeybaseOneshotArgs(
+        { username: "lbottestbot" },
+        {
+          homeDir: "/tmp/keybase-home",
+          pidFile: "/tmp/keybase.pid",
+          socketFile: "/tmp/keybase.sock",
+        },
+      ),
+    ).toEqual([
       "--home",
       "/tmp/keybase-home",
-      "oneshot",
+      "--socket-file",
+      "/tmp/keybase.sock",
+      "--pid-file",
+      "/tmp/keybase.pid",
+      "service",
+      "--oneshot-username",
+      "lbottestbot",
     ]);
   });
 
-  it("runs oneshot with username and paper key in the environment", async () => {
-    const runCommand = vi.fn().mockResolvedValue({
-      stdout: "",
-      stderr: "",
+  it("runs oneshot with username on the command line and the paper key on stdin", async () => {
+    const child = new MockOneshotChild();
+    const spawnCommand = vi.fn().mockReturnValue(child);
+    const runCommand = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const stdinChunks: string[] = [];
+    child.stdin.setEncoding("utf8");
+    child.stdin.on("data", (chunk: string) => {
+      stdinChunks.push(chunk);
     });
 
-    await keybaseOneshot(
+    const pending = keybaseOneshot(
       {
         paperKey: "paper key words",
         username: "lbottestbot",
@@ -128,23 +181,56 @@ describe("Keybase CLI transport", () => {
           KEYBASE_SERVICE: "1",
         },
         homeDir: "/tmp/keybase-home",
+        pidFile: "/tmp/keybase.pid",
         runCommand,
+        socketFile: "/tmp/keybase.sock",
+        spawnCommand,
       },
     );
+    await pending;
 
+    expect(spawnCommand).toHaveBeenCalledWith(
+      "/usr/local/bin/keybase",
+      [
+        "--home",
+        "/tmp/keybase-home",
+        "--socket-file",
+        "/tmp/keybase.sock",
+        "--pid-file",
+        "/tmp/keybase.pid",
+        "service",
+        "--oneshot-username",
+        "lbottestbot",
+      ],
+      {
+        env: expect.objectContaining({
+          KEYBASE_SERVICE: "1",
+        }),
+        stdio: ["pipe", "ignore", "pipe"],
+      },
+    );
     expect(runCommand).toHaveBeenCalledWith(
       "/usr/local/bin/keybase",
-      ["--home", "/tmp/keybase-home", "oneshot"],
+      [
+        "--home",
+        "/tmp/keybase-home",
+        "--socket-file",
+        "/tmp/keybase.sock",
+        "--pid-file",
+        "/tmp/keybase.pid",
+        "chat",
+        "notification-settings",
+        "-disable-typing=true",
+      ],
       {
-        env: {
-          KEYBASE_PAPERKEY: "paper key words",
+        env: expect.objectContaining({
           KEYBASE_SERVICE: "1",
-          KEYBASE_USERNAME: "lbottestbot",
-        },
+        }),
         maxBuffer: undefined,
-        timeoutMs: undefined,
+        timeoutMs: 1000,
       },
     );
+    expect(stdinChunks.join("")).toBe("paper key words\n");
   });
 
   it("retries api-listen when the keybase service socket is still booting", async () => {

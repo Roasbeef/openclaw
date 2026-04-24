@@ -94,6 +94,8 @@ function buildKeybaseCliOptions(account: ResolvedKeybaseAccount) {
   return {
     binary: account.binary,
     ...(account.homeDir ? { homeDir: account.homeDir } : {}),
+    ...(account.socketFile ? { socketFile: account.socketFile } : {}),
+    ...(account.pidFile ? { pidFile: account.pidFile } : {}),
   };
 }
 

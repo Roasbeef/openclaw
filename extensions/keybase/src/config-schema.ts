@@ -27,6 +27,8 @@ export const KeybaseAccountConfigSchema = z
     username: z.string().optional(),
     paperKey: z.string().optional(),
     paperKeyFile: z.string().optional(),
+    pidFile: z.string().optional(),
+    socketFile: z.string().optional(),
     enableTyping: z.boolean().optional(),
     defaultTo: z.string().optional(),
     groupPolicy: GroupPolicySchema.optional(),

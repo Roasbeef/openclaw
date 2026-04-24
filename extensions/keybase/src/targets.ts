@@ -1,5 +1,7 @@
 import type { KeybaseConversationRef } from "./protocol.js";
 
+const DEFAULT_KEYBASE_TEAM_TOPIC = "general";
+
 export interface ParsedKeybaseTarget {
   conversationId?: string;
   normalized: string;
@@ -45,7 +47,7 @@ export function buildKeybaseDmTarget(username: string): string | null {
 
 export function buildKeybaseGroupTarget(teamName: string, topicName: string): string | null {
   const normalizedTeam = teamName.trim();
-  const normalizedTopic = topicName.trim();
+  const normalizedTopic = topicName.trim() || DEFAULT_KEYBASE_TEAM_TOPIC;
   if (!normalizedTeam || !normalizedTopic) {
     return null;
   }
@@ -78,10 +80,22 @@ export function parseKeybaseTarget(raw: string): ParsedKeybaseTarget | null {
     };
   }
 
-  const teamCandidate = /^team:/i.test(withoutPrefix)
-    ? withoutPrefix.replace(/^team:/i, "").trim()
-    : withoutPrefix;
+  const hasTeamPrefix = /^team:/i.test(withoutPrefix);
+  const teamCandidate = hasTeamPrefix ? withoutPrefix.replace(/^team:/i, "").trim() : withoutPrefix;
   const topicSeparator = teamCandidate.indexOf("#");
+  if (hasTeamPrefix && topicSeparator < 0) {
+    const teamName = teamCandidate.trim();
+    if (!teamName) {
+      return null;
+    }
+    return {
+      raw,
+      teamName,
+      topicName: DEFAULT_KEYBASE_TEAM_TOPIC,
+      chatType: "group",
+      normalized: `team:${teamName}#${DEFAULT_KEYBASE_TEAM_TOPIC}`,
+    };
+  }
   if (topicSeparator > 0) {
     const teamName = teamCandidate.slice(0, topicSeparator).trim();
     const topicName = teamCandidate.slice(topicSeparator + 1).trim();
@@ -146,11 +160,14 @@ export function resolveKeybaseConversationRef(
     return { conversationId: parsed.conversationId };
   }
   if (parsed.teamName && parsed.topicName) {
+    const topicName = parsed.topicName.trim();
     return {
       channel: {
         name: parsed.teamName,
         membersType: "team",
-        topicName: parsed.topicName,
+        ...(topicName.toLowerCase() === DEFAULT_KEYBASE_TEAM_TOPIC
+          ? {}
+          : { topicName: parsed.topicName }),
       },
     };
   }
@@ -178,12 +195,16 @@ export function inferKeybaseInboundChatType(params: {
 
 export function buildKeybaseInboundGroupId(params: {
   channel: {
+    membersType?: string;
     name: string;
     topicName?: string;
   };
 }): string | undefined {
-  if (!params.channel.name || !params.channel.topicName) {
+  if (!params.channel.name) {
     return undefined;
   }
-  return buildKeybaseGroupTarget(params.channel.name, params.channel.topicName) ?? undefined;
+  const topicName =
+    params.channel.topicName ??
+    (params.channel.membersType?.toLowerCase() === "team" ? DEFAULT_KEYBASE_TEAM_TOPIC : "");
+  return buildKeybaseGroupTarget(params.channel.name, topicName) ?? undefined;
 }

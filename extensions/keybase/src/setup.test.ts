@@ -10,6 +10,8 @@ describe("applyKeybaseSetup", () => {
         input: {
           username: "openclaw-bot",
           paperKeyFile: "/tmp/paperkey.txt",
+          pidFile: "/tmp/keybased.pid",
+          socketFile: "/tmp/keybased.sock",
           defaultTo: "team:lightninglabs#ops",
           enableTyping: true,
         },
@@ -19,6 +21,8 @@ describe("applyKeybaseSetup", () => {
         keybase: {
           username: "openclaw-bot",
           paperKeyFile: "/tmp/paperkey.txt",
+          pidFile: "/tmp/keybased.pid",
+          socketFile: "/tmp/keybased.sock",
           defaultTo: "team:lightninglabs#ops",
           enableTyping: true,
         },

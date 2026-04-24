@@ -25,6 +25,9 @@ describe("resolveKeybaseContainerConfig", () => {
       homeDir: "/home/node",
       paperKey: undefined,
       paperKeyFile: undefined,
+      pidFile: "/tmp/openclaw-keybase/keybased.pid",
+      runtimeDir: "/tmp/openclaw-keybase",
+      socketFile: "/tmp/openclaw-keybase/keybased.sock",
       tmpDir: "/home/node/.openclaw/tmp",
       username: undefined,
     });
@@ -39,6 +42,9 @@ describe("resolveKeybaseContainerConfig", () => {
         OPENCLAW_KEYBASE_AUTO_ONESHOT: "off",
         OPENCLAW_KEYBASE_BINARY: " /usr/local/bin/keybase ",
         OPENCLAW_KEYBASE_HOME: " /srv/keybase ",
+        OPENCLAW_KEYBASE_PID_FILE: " /srv/runtime/keybased.pid ",
+        OPENCLAW_KEYBASE_RUNTIME_DIR: " /srv/runtime ",
+        OPENCLAW_KEYBASE_SOCKET_FILE: " /srv/runtime/keybased.sock ",
         OPENCLAW_TMPDIR: " /srv/openclaw-tmp ",
       }),
     ).toEqual({
@@ -48,6 +54,9 @@ describe("resolveKeybaseContainerConfig", () => {
       homeDir: "/srv/keybase",
       paperKey: "key words",
       paperKeyFile: undefined,
+      pidFile: "/srv/runtime/keybased.pid",
+      runtimeDir: "/srv/runtime",
+      socketFile: "/srv/runtime/keybased.sock",
       tmpDir: "/srv/openclaw-tmp",
       username: "claw_ll",
     });
@@ -80,6 +89,9 @@ describe("applyKeybaseContainerConfig", () => {
         binary: "keybase",
         configPath: "/tmp/openclaw.json",
         homeDir: "/home/node",
+        pidFile: "/tmp/openclaw-keybase/keybased.pid",
+        runtimeDir: "/tmp/openclaw-keybase",
+        socketFile: "/tmp/openclaw-keybase/keybased.sock",
         tmpDir: "/tmp/openclaw-tmp",
         username: "claw_ll",
       },
@@ -99,6 +111,8 @@ describe("applyKeybaseContainerConfig", () => {
             },
           },
           homeDir: "/home/node",
+          pidFile: "/tmp/openclaw-keybase/keybased.pid",
+          socketFile: "/tmp/openclaw-keybase/keybased.sock",
           username: "claw_ll",
         },
       },
@@ -134,6 +148,9 @@ describe("prepareKeybaseContainer", () => {
         configPath,
         homeDir: path.join(rootDir, "keybase-home"),
         paperKeyFile: paperKeyPath,
+        pidFile: path.join(rootDir, "runtime", "keybased.pid"),
+        runtimeDir: path.join(rootDir, "runtime"),
+        socketFile: path.join(rootDir, "runtime", "keybased.sock"),
         tmpDir: path.join(rootDir, "openclaw-tmp"),
         username: "claw_ll",
       },
@@ -150,6 +167,8 @@ describe("prepareKeybaseContainer", () => {
       {
         binary: "keybase",
         homeDir: path.join(rootDir, "keybase-home"),
+        pidFile: path.join(rootDir, "runtime", "keybased.pid"),
+        socketFile: path.join(rootDir, "runtime", "keybased.sock"),
       },
     );
 
@@ -161,6 +180,8 @@ describe("prepareKeybaseContainer", () => {
         enabled: true,
         groupPolicy: "allowlist",
         homeDir: path.join(rootDir, "keybase-home"),
+        pidFile: path.join(rootDir, "runtime", "keybased.pid"),
+        socketFile: path.join(rootDir, "runtime", "keybased.sock"),
         username: "claw_ll",
       },
     });
@@ -180,6 +201,9 @@ describe("prepareKeybaseContainer", () => {
         binary: "keybase",
         configPath: path.join(rootDir, "openclaw.json"),
         homeDir: path.join(rootDir, "keybase-home"),
+        pidFile: path.join(rootDir, "runtime", "keybased.pid"),
+        runtimeDir: path.join(rootDir, "runtime"),
+        socketFile: path.join(rootDir, "runtime", "keybased.sock"),
         tmpDir: path.join(rootDir, "openclaw-tmp"),
       },
       {

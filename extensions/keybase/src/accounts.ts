@@ -77,9 +77,11 @@ function hasConfiguration(config: KeybaseResolvedAccountConfig): boolean {
   return Boolean(
     config.defaultTo?.trim() ||
     config.homeDir?.trim() ||
+    config.pidFile?.trim() ||
     config.username?.trim() ||
     config.paperKey?.trim() ||
-    config.paperKeyFile?.trim(),
+    config.paperKeyFile?.trim() ||
+    config.socketFile?.trim(),
   );
 }
 
@@ -115,6 +117,12 @@ export function resolveKeybaseAccount(params: {
       : {}),
     ...(normalizeOptionalString(merged.paperKeyFile)
       ? { paperKeyFile: normalizeOptionalString(merged.paperKeyFile) }
+      : {}),
+    ...(normalizeOptionalString(merged.pidFile)
+      ? { pidFile: normalizeOptionalString(merged.pidFile) }
+      : {}),
+    ...(normalizeOptionalString(merged.socketFile)
+      ? { socketFile: normalizeOptionalString(merged.socketFile) }
       : {}),
     ...(normalizeOptionalString(merged.username)
       ? { username: normalizeOptionalString(merged.username) }

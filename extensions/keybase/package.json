@@ -44,6 +44,14 @@
         {
           "flags": "--keybase-paperkey-file <path>",
           "description": "Path to a Keybase paper key file"
+        },
+        {
+          "flags": "--keybase-socket-file <path>",
+          "description": "Path to the keybased socket file"
+        },
+        {
+          "flags": "--keybase-pid-file <path>",
+          "description": "Path to the keybased pid file"
         }
       ]
     }

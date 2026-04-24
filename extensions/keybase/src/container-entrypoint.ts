@@ -6,6 +6,7 @@ import { keybaseOneshot } from "./client.js";
 
 const DEFAULT_KEYBASE_BINARY = "keybase";
 const DEFAULT_KEYBASE_HOME = "/home/node";
+const DEFAULT_KEYBASE_RUNTIME_DIR = "/tmp/openclaw-keybase";
 const DEFAULT_CONFIG_PATH = "/home/node/.openclaw/openclaw.json";
 
 type ReadFileLike = typeof readFile;
@@ -33,6 +34,9 @@ export interface ResolvedKeybaseContainerConfig {
   homeDir: string;
   paperKey?: string;
   paperKeyFile?: string;
+  pidFile: string;
+  runtimeDir: string;
+  socketFile: string;
   tmpDir: string;
   username?: string;
 }
@@ -82,6 +86,8 @@ export function resolveKeybaseContainerConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): ResolvedKeybaseContainerConfig {
   const configPath = normalizeOptionalString(env.OPENCLAW_CONFIG_PATH) ?? DEFAULT_CONFIG_PATH;
+  const runtimeDir =
+    normalizeOptionalString(env.OPENCLAW_KEYBASE_RUNTIME_DIR) ?? DEFAULT_KEYBASE_RUNTIME_DIR;
   return {
     autoOneshot: isTruthy(env.OPENCLAW_KEYBASE_AUTO_ONESHOT, true),
     binary: normalizeOptionalString(env.OPENCLAW_KEYBASE_BINARY) ?? DEFAULT_KEYBASE_BINARY,
@@ -89,6 +95,13 @@ export function resolveKeybaseContainerConfig(
     homeDir: normalizeOptionalString(env.OPENCLAW_KEYBASE_HOME) ?? DEFAULT_KEYBASE_HOME,
     paperKey: normalizeOptionalString(env.KEYBASE_PAPERKEY),
     paperKeyFile: normalizeOptionalString(env.KEYBASE_PAPERKEY_FILE),
+    pidFile:
+      normalizeOptionalString(env.OPENCLAW_KEYBASE_PID_FILE) ??
+      path.join(runtimeDir, "keybased.pid"),
+    runtimeDir,
+    socketFile:
+      normalizeOptionalString(env.OPENCLAW_KEYBASE_SOCKET_FILE) ??
+      path.join(runtimeDir, "keybased.sock"),
     tmpDir:
       normalizeOptionalString(env.OPENCLAW_TMPDIR) ??
       normalizeOptionalString(env.TMPDIR) ??
@@ -116,6 +129,8 @@ export function applyKeybaseContainerConfig(
   }
   channel.binary = resolved.binary;
   channel.homeDir = resolved.homeDir;
+  channel.pidFile = resolved.pidFile;
+  channel.socketFile = resolved.socketFile;
   if (resolved.username) {
     channel.username = resolved.username;
   }
@@ -184,6 +199,9 @@ export async function prepareKeybaseContainer(
   const runtimeDeps = { ...defaultRuntimeDeps, ...deps };
   await runtimeDeps.mkdir(path.dirname(resolved.configPath), { recursive: true });
   await runtimeDeps.mkdir(resolved.homeDir, { recursive: true });
+  await runtimeDeps.mkdir(resolved.runtimeDir, { recursive: true });
+  await runtimeDeps.mkdir(path.dirname(resolved.pidFile), { recursive: true });
+  await runtimeDeps.mkdir(path.dirname(resolved.socketFile), { recursive: true });
   await runtimeDeps.mkdir(resolved.tmpDir, { recursive: true });
 
   const nextConfig = applyKeybaseContainerConfig(
@@ -209,6 +227,8 @@ export async function prepareKeybaseContainer(
     {
       binary: resolved.binary,
       homeDir: resolved.homeDir,
+      pidFile: resolved.pidFile,
+      socketFile: resolved.socketFile,
     },
   );
 }
