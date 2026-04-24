@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resetKeybasePreparedAccountCache, sendKeybaseMedia, sendKeybaseText } from "./runtime.js";
+import {
+  normalizeKeybaseReactionBody,
+  resetKeybasePreparedAccountCache,
+  sendKeybaseMedia,
+  sendKeybaseReaction,
+  sendKeybaseText,
+} from "./runtime.js";
 import type { ResolvedKeybaseAccount } from "./types.js";
 
 const account: ResolvedKeybaseAccount = {
@@ -69,6 +75,45 @@ describe("Keybase runtime helpers", () => {
         pidFile: "/tmp/keybase.pid",
         socketFile: "/tmp/keybase.sock",
       },
+    );
+  });
+
+  it("normalizes common unicode ack reactions to Keybase shortcodes", () => {
+    expect(normalizeKeybaseReactionBody("\u{1f440}")).toBe(":eyes:");
+    expect(normalizeKeybaseReactionBody(":hourglass_flowing_sand:")).toBe(
+      ":hourglass_flowing_sand:",
+    );
+  });
+
+  it("sends reactions through the Keybase reaction API", async () => {
+    const apiRequest = vi.fn().mockResolvedValue({ id: 43 });
+
+    const result = await sendKeybaseReaction({
+      account,
+      to: "team:lightninglabs#ops",
+      messageId: "41",
+      emoji: "\u{1f440}",
+      deps: {
+        apiRequest,
+        configureNotificationSettings: vi.fn().mockResolvedValue(undefined),
+        oneshot: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    expect(result).toEqual({ messageId: "43" });
+    expect(apiRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "reaction",
+        params: {
+          options: expect.objectContaining({
+            message_id: 41,
+            message: {
+              body: ":eyes:",
+            },
+          }),
+        },
+      }),
+      expect.any(Object),
     );
   });
 

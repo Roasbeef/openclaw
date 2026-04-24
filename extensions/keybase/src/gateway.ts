@@ -1,6 +1,7 @@
 import { isNormalizedSenderAllowed } from "openclaw/plugin-sdk/allow-from";
 import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
+import { resolveAckReaction, shouldAckReaction } from "openclaw/plugin-sdk/channel-feedback";
 import {
   buildMentionRegexes,
   matchesMentionPatterns,
@@ -29,7 +30,7 @@ import {
   resolveKeybaseGroupSystemPrompt,
 } from "./groups.js";
 import type { KeybaseListenEvent } from "./listen.js";
-import { ensureKeybaseAccountPrepared, sendKeybaseText } from "./runtime.js";
+import { ensureKeybaseAccountPrepared, sendKeybaseReaction, sendKeybaseText } from "./runtime.js";
 import {
   buildKeybaseInboundGroupId,
   inferKeybaseInboundChatType,
@@ -101,6 +102,52 @@ function buildKeybaseCliOptions(account: ResolvedKeybaseAccount) {
 
 function buildConversationReplyTarget(conversationId: string): string {
   return `conv:${conversationId}`;
+}
+
+function maybeSendKeybaseAckReaction(params: {
+  account: ResolvedKeybaseAccount;
+  ctx: ChannelGatewayContext<ResolvedKeybaseAccount>;
+  effectiveWasMentioned: boolean;
+  isDirect: boolean;
+  isGroup: boolean;
+  isMentionableGroup: boolean;
+  messageId: string;
+  requireMention: boolean;
+  routeAgentId: string;
+  target: string;
+  canDetectMention?: boolean;
+  shouldBypassMention?: boolean;
+}) {
+  const emoji = resolveAckReaction(params.ctx.cfg, params.routeAgentId, {
+    channel: "keybase",
+    accountId: params.account.accountId,
+  });
+  if (!emoji) {
+    return;
+  }
+  const shouldSend = shouldAckReaction({
+    scope: params.ctx.cfg.messages?.ackReactionScope,
+    isDirect: params.isDirect,
+    isGroup: params.isGroup,
+    isMentionableGroup: params.isMentionableGroup,
+    requireMention: params.requireMention,
+    canDetectMention: params.canDetectMention ?? true,
+    effectiveWasMentioned: params.effectiveWasMentioned,
+    shouldBypassMention: params.shouldBypassMention,
+  });
+  if (!shouldSend) {
+    return;
+  }
+  void sendKeybaseReaction({
+    account: params.account,
+    to: params.target,
+    messageId: params.messageId,
+    emoji,
+  }).catch((error) => {
+    params.ctx.log?.debug?.(
+      `[${params.account.accountId}] keybase ack reaction failed for ${params.target}/${params.messageId}: ${String(error)}`,
+    );
+  });
 }
 
 function resolveKeybaseChannelRuntime(
@@ -248,6 +295,27 @@ async function handleDirectMessage(params: {
     return;
   }
 
+  const route = channelRuntime.routing.resolveAgentRoute({
+    cfg: params.ctx.cfg,
+    channel: "keybase",
+    accountId: params.account.accountId,
+    peer: {
+      kind: "direct",
+      id: senderId,
+    },
+  });
+  maybeSendKeybaseAckReaction({
+    account: params.account,
+    ctx: params.ctx,
+    effectiveWasMentioned: false,
+    isDirect: true,
+    isGroup: false,
+    isMentionableGroup: false,
+    messageId: String(message.id),
+    requireMention: false,
+    routeAgentId: route.agentId,
+    target: replyTarget,
+  });
   params.statusSink({ lastInboundAt: Date.now() });
   await dispatchInboundDirectDmWithRuntime({
     cfg: params.ctx.cfg,
@@ -476,6 +544,20 @@ async function handleGroupMessage(params: {
     CommandAuthorized: commandAccess.commandAuthorized,
   });
 
+  maybeSendKeybaseAckReaction({
+    account: params.account,
+    ctx: params.ctx,
+    effectiveWasMentioned: mentionDecision.effectiveWasMentioned,
+    isDirect: false,
+    isGroup: true,
+    isMentionableGroup: true,
+    messageId: String(message.id),
+    requireMention,
+    routeAgentId: route.agentId,
+    target: buildConversationReplyTarget(message.conversationId),
+    canDetectMention: mentionState.canDetectMention,
+    shouldBypassMention: mentionDecision.shouldBypassMention,
+  });
   params.statusSink({ lastInboundAt: Date.now() });
   await dispatchInboundReplyWithBase({
     cfg: params.ctx.cfg,

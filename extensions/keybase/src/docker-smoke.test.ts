@@ -1,8 +1,12 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { buildKeybaseDockerSmokeImage, writeKeybaseDockerSmokeFiles } from "./docker-smoke.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  buildKeybaseDockerSmokeImage,
+  runKeybaseDockerBlackboxSmoke,
+  writeKeybaseDockerSmokeFiles,
+} from "./docker-smoke.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -33,7 +37,9 @@ describe("writeKeybaseDockerSmokeFiles", () => {
         path.join(outputDir, "docker-compose.keybase.yml"),
         path.join(outputDir, "state", "home", ".openclaw", "openclaw.json"),
         path.join(outputDir, "state", "home", ".openclaw", "secrets", "README.txt"),
+        path.join(outputDir, "state", "sender-home", ".openclaw", "secrets", "README.txt"),
         path.join(outputDir, "state", "home", ".openclaw", "tmp"),
+        path.join(outputDir, "state", "sender-home", ".openclaw", "tmp"),
       ]),
     );
 
@@ -53,6 +59,12 @@ describe("writeKeybaseDockerSmokeFiles", () => {
     expect(compose).toContain("./state/home:/home/node");
     expect(compose).toContain("openclaw-keybase-cli:");
     expect(compose).toContain('network_mode: "service:openclaw-keybase-gateway"');
+    expect(compose).toContain("openclaw-keybase-sender:");
+    expect(compose).toContain("- blackbox");
+    expect(compose).toContain("KEYBASE_USERNAME: ${KEYBASE_TEST_USERNAME:-}");
+    expect(compose).toContain("./state/sender-home:/home/node");
+    expect(compose).toContain("sleep");
+    expect(compose).toContain("infinity");
 
     const envExample = await readFile(path.join(outputDir, ".env.example"), "utf8");
     expect(envExample).toContain("KEYBASE_USERNAME=claw_ll");
@@ -61,6 +73,8 @@ describe("writeKeybaseDockerSmokeFiles", () => {
     expect(envExample).toContain(
       "KEYBASE_PAPERKEY_FILE=/home/node/.openclaw/secrets/keybase-paperkey",
     );
+    expect(envExample).toContain("KEYBASE_TEST_USERNAME=");
+    expect(envExample).toContain("KEYBASE_TEST_TEAM=lbottest");
 
     const config = await readFile(
       path.join(outputDir, "state", "home", ".openclaw", "openclaw.json"),
@@ -71,6 +85,7 @@ describe("writeKeybaseDockerSmokeFiles", () => {
     expect(config).toContain('"CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}"');
     expect(config).toContain('"keybase"');
     expect(config).toContain('"/tmp/openclaw-keybase/keybased.sock"');
+    expect(config).toContain('":eyes:"');
     expect(config).toContain('"allowInsecureAuth": true');
     expect(config).toContain('"controlUi"');
     expect(config).toContain('"/home/node"');
@@ -80,6 +95,7 @@ describe("writeKeybaseDockerSmokeFiles", () => {
     expect(readme).toContain("docker compose --env-file .env -f docker-compose.keybase.yml up -d");
     expect(readme).toContain("--socket-file /tmp/openclaw-keybase/keybased.sock");
     expect(readme).toContain("openclaw-keybase-cli");
+    expect(readme).toContain("pnpm keybase:smoke:blackbox");
   });
 });
 
@@ -114,5 +130,113 @@ describe("buildKeybaseDockerSmokeImage", () => {
         "docker build --platform linux/amd64 -t openclaw:keybase-test --build-arg OPENCLAW_BASE_IMAGE=openclaw:keybase-base -f extensions/keybase/docker/Dockerfile . @/repo/openclaw",
       ),
     ]);
+  });
+});
+
+describe("runKeybaseDockerBlackboxSmoke", () => {
+  it("starts the sender profile, sends a test mention, and waits for a reply", async () => {
+    const calls: string[] = [];
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_776_994_500_000);
+
+    try {
+      const result = await runKeybaseDockerBlackboxSmoke(
+        {
+          botUsername: "lbottestbot",
+          outputDir: "/repo/openclaw/.artifacts/keybase-docker",
+          team: "lbottest",
+        },
+        {
+          async runCommand(command, args, cwd) {
+            calls.push([command, ...args, `@${cwd}`].join(" "));
+            if (args.includes("whoami")) {
+              return { stderr: "", stdout: "ok\n" };
+            }
+            if (args.includes("channels") && args.includes("status")) {
+              return {
+                stderr: "",
+                stdout: JSON.stringify({
+                  channelAccounts: {
+                    keybase: [
+                      {
+                        running: true,
+                        lastError: null,
+                        lastInboundAt: 1_776_994_501_000,
+                        lastOutboundAt: 1_776_994_502_000,
+                      },
+                    ],
+                  },
+                }),
+              };
+            }
+            const apiIndex = args.indexOf("-m");
+            if (apiIndex >= 0) {
+              const request = JSON.parse(args[apiIndex + 1]) as {
+                method?: string;
+              };
+              if (request.method === "list") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      conversations: [
+                        {
+                          id: "conv-team",
+                          is_default_conv: true,
+                          channel: { name: "lbottest", members_type: "team" },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+              if (request.method === "send") {
+                return { stderr: "", stdout: JSON.stringify({ result: { id: 101 } }) };
+              }
+              if (request.method === "read") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      messages: [
+                        {
+                          msg: {
+                            id: 102,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_502_000,
+                            content: {
+                              type: "text",
+                              text: {
+                                replyTo: 101,
+                                body: "keybase blackbox smoke ok",
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+            }
+            return { stderr: "", stdout: "" };
+          },
+        },
+      );
+
+      expect(result).toMatchObject({
+        botUsername: "lbottestbot",
+        inboundAt: 1_776_994_501_000,
+        outboundAt: 1_776_994_502_000,
+        replyPreview: "keybase blackbox smoke ok",
+        sentMessageId: "101",
+        team: "lbottest",
+      });
+      expect(calls[0]).toContain(
+        "docker compose --env-file /repo/openclaw/.artifacts/keybase-docker/.env -f /repo/openclaw/.artifacts/keybase-docker/docker-compose.keybase.yml --profile blackbox up -d openclaw-keybase-gateway openclaw-keybase-sender",
+      );
+      expect(calls.some((call) => call.includes("openclaw-keybase-sender keybase"))).toBe(true);
+    } finally {
+      now.mockRestore();
+    }
   });
 });

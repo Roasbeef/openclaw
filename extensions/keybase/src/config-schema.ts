@@ -21,6 +21,7 @@ export const KeybaseAccountConfigSchema = z
     name: z.string().optional(),
     enabled: z.boolean().optional(),
     allowFrom: AllowFromListSchema,
+    ackReaction: z.string().optional(),
     binary: z.string().optional(),
     dmPolicy: DmPolicySchema.optional(),
     homeDir: z.string().optional(),

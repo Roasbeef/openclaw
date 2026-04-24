@@ -6,6 +6,7 @@ import type { ResolvedKeybaseAccount } from "./types.js";
 const mocks = vi.hoisted(() => ({
   startKeybaseApiListen: vi.fn(),
   ensureKeybaseAccountPrepared: vi.fn(async () => {}),
+  sendKeybaseReaction: vi.fn(async () => ({ messageId: "reaction-1" })),
   sendKeybaseText: vi.fn(async () => ({ messageId: "sent-1" })),
 }));
 
@@ -22,6 +23,7 @@ vi.mock("./runtime.js", async () => {
   return {
     ...actual,
     ensureKeybaseAccountPrepared: mocks.ensureKeybaseAccountPrepared,
+    sendKeybaseReaction: mocks.sendKeybaseReaction,
     sendKeybaseText: mocks.sendKeybaseText,
   };
 });
@@ -128,6 +130,7 @@ describe("keybaseGatewayAdapter.startAccount", () => {
   afterEach(() => {
     mocks.startKeybaseApiListen.mockReset();
     mocks.ensureKeybaseAccountPrepared.mockClear();
+    mocks.sendKeybaseReaction.mockClear();
     mocks.sendKeybaseText.mockClear();
   });
 
@@ -184,6 +187,7 @@ describe("keybaseGatewayAdapter.startAccount", () => {
       }),
       abortSignal: abort.signal,
       cfg: {
+        messages: { ackReaction: "", ackReactionScope: "none" },
         session: { store: { type: "jsonl" } },
         commands: { useAccessGroups: true },
       } as never,
@@ -329,6 +333,7 @@ describe("keybaseGatewayAdapter.startAccount", () => {
       }),
       abortSignal: abort.signal,
       cfg: {
+        messages: { ackReaction: ":eyes:", ackReactionScope: "group-mentions" },
         session: { store: { type: "jsonl" } },
         commands: { useAccessGroups: true },
       } as never,
@@ -360,6 +365,13 @@ describe("keybaseGatewayAdapter.startAccount", () => {
           to: "conv:conv-team-1",
           text: "reply from agent",
           replyToId: "99",
+        }),
+      );
+      expect(mocks.sendKeybaseReaction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: "conv:conv-team-1",
+          messageId: "99",
+          emoji: ":eyes:",
         }),
       );
     });

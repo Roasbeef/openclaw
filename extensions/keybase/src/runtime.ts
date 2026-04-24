@@ -6,7 +6,11 @@ import {
   keybaseConfigureNotificationSettings,
   keybaseOneshot,
 } from "./client.js";
-import { buildKeybaseAttachRequest, buildKeybaseSendRequest } from "./protocol.js";
+import {
+  buildKeybaseAttachRequest,
+  buildKeybaseReactionRequest,
+  buildKeybaseSendRequest,
+} from "./protocol.js";
 import { resolveKeybaseConversationRef } from "./targets.js";
 import type { ResolvedKeybaseAccount } from "./types.js";
 
@@ -68,6 +72,23 @@ function parseReplyToId(replyToId?: string | null): number | undefined {
     return undefined;
   }
   return Number.parseInt(replyToId.trim(), 10);
+}
+
+function parseMessageId(messageId: string): number {
+  if (!/^\d+$/.test(messageId.trim())) {
+    throw new Error(`Invalid Keybase message id: ${messageId}`);
+  }
+  return Number.parseInt(messageId.trim(), 10);
+}
+
+const KEYBASE_REACTION_SHORTCODES = new Map<string, string>([
+  ["\u{1f440}", ":eyes:"],
+  ["\u{2705}", ":white_check_mark:"],
+]);
+
+export function normalizeKeybaseReactionBody(reaction: string): string {
+  const trimmed = reaction.trim();
+  return KEYBASE_REACTION_SHORTCODES.get(trimmed) ?? trimmed;
 }
 
 async function resolvePaperKey(
@@ -142,6 +163,32 @@ export async function sendKeybaseText(params: {
       ...(parseReplyToId(params.replyToId) !== undefined
         ? { replyTo: parseReplyToId(params.replyToId) }
         : {}),
+    }),
+    resolveCliOptions(params.account),
+  );
+  return {
+    messageId: normalizeMessageId(result.id ?? result.outbox_id),
+  };
+}
+
+export async function sendKeybaseReaction(params: {
+  account: ResolvedKeybaseAccount;
+  emoji: string;
+  messageId: string;
+  to: string;
+  deps?: Partial<RuntimeDeps>;
+}): Promise<{ messageId: string }> {
+  const conversationRef = resolveKeybaseConversationRef(params.to);
+  if (!conversationRef) {
+    throw new Error(`Invalid Keybase target: ${params.to}`);
+  }
+  const runtimeDeps = { ...defaultRuntimeDeps, ...params.deps };
+  await ensureKeybaseAccountPrepared(params.account, runtimeDeps);
+  const result = await runtimeDeps.apiRequest<SendResultPayload>(
+    buildKeybaseReactionRequest({
+      ...conversationRef,
+      body: normalizeKeybaseReactionBody(params.emoji),
+      messageId: parseMessageId(params.messageId),
     }),
     resolveCliOptions(params.account),
   );

@@ -10,6 +10,7 @@ title: "Keybase"
 # Keybase
 
 Status: experimental bundled plugin in progress. The current implementation supports DMs, team chats, mention-gated group routing, pairing, route allowlists, per-group prompts, and per-group skill filters.
+It also supports best-effort ack reactions on handled messages.
 
 <CardGroup cols={3}>
   <Card title="Pairing" icon="link" href="/channels/pairing">
@@ -58,6 +59,7 @@ Useful fields:
 | --------------------------- | -------------------------------------------- |
 | `username`                  | Keybase bot username                         |
 | `paperKey` / `paperKeyFile` | Paper key for the Keybase service bootstrap  |
+| `ackReaction`               | Optional ack reaction emoji or shortcode     |
 | `homeDir`                   | Optional Keybase home override               |
 | `socketFile`                | Optional `keybased` socket path              |
 | `pidFile`                   | Optional `keybased` pid file path            |
@@ -108,6 +110,32 @@ Current target forms:
 - `dm:alice,bob`
 - `team:example#lbottest`
 - `conv:<conversation-id>`
+
+## Ack reactions
+
+Keybase exposes reactions through the `chat api` `reaction` method. OpenClaw uses
+that surface for acknowledgement reactions while a reply is being processed.
+
+```json5
+{
+  messages: {
+    ackReaction: ":eyes:",
+    ackReactionScope: "group-mentions",
+  },
+  channels: {
+    keybase: {
+      ackReaction: ":eyes:",
+    },
+  },
+}
+```
+
+Notes:
+
+- `channels.keybase.ackReaction` overrides the global message ack reaction for Keybase.
+- Account-level overrides are available at `channels.keybase.accounts.<id>.ackReaction`.
+- The Unicode default eye reaction is normalized to the Keybase `:eyes:` shortcode.
+- Reaction cleanup/removal is not enabled yet; this first pass leaves the ack reaction on the inbound message.
 
 ## Pairing flow
 
@@ -171,3 +199,24 @@ Notes:
   `KEYBASE_PAPERKEY_FILE=/home/node/.openclaw/secrets/keybase-paperkey`.
 - The smoke path currently defaults to `linux/amd64` because the official
   Keybase Linux package is amd64-oriented.
+
+### Blackbox sender container
+
+For a full local blackbox run, use a second Keybase identity as the sender:
+
+```bash
+pnpm keybase:smoke:scaffold
+cd .artifacts/keybase-docker
+cp .env.example .env
+# Fill KEYBASE_USERNAME/KEYBASE_PAPERKEY_FILE for the bot.
+# Fill KEYBASE_TEST_USERNAME/KEYBASE_TEST_PAPERKEY_FILE for the sender.
+# Ensure KEYBASE_TEST_USERNAME is already in KEYBASE_TEST_TEAM.
+cd ../..
+pnpm keybase:smoke:blackbox --output-dir .artifacts/keybase-docker \
+  --team lbottest \
+  --bot lbottestbot
+```
+
+The blackbox command starts the gateway and sender containers, sends a mention
+from the sender identity, then waits until OpenClaw records fresh inbound and
+outbound Keybase timestamps and the sender can read the bot reply.
