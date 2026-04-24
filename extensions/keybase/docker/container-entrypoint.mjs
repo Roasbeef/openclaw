@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const DEFAULT_KEYBASE_BINARY = "keybase";
@@ -220,6 +220,59 @@ function isKeybaseLoginRequiredError(error) {
   return String(error).includes("Login required");
 }
 
+async function findLingeringKeybasePids() {
+  let entries;
+  try {
+    entries = await readdir("/proc");
+  } catch {
+    return [];
+  }
+
+  const pids = [];
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) {
+      continue;
+    }
+    const pid = Number.parseInt(entry, 10);
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+      continue;
+    }
+    let cmdline;
+    try {
+      cmdline = await readFile(path.join("/proc", entry, "cmdline"), "utf8");
+    } catch {
+      continue;
+    }
+    const parts = cmdline.split("\0").filter(Boolean);
+    if (parts.some((part) => path.basename(part) === "keybase")) {
+      pids.push(pid);
+    }
+  }
+  return pids;
+}
+
+async function stopLingeringKeybaseProcesses() {
+  const pids = await findLingeringKeybasePids();
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "TERM");
+    } catch {
+      // The process may already be gone.
+    }
+  }
+  if (pids.length > 0) {
+    await sleep(1000);
+  }
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 0);
+      process.kill(pid, "KILL");
+    } catch {
+      // Process exited after TERM.
+    }
+  }
+}
+
 async function stopExistingKeybaseService(resolved) {
   try {
     const rawPid = await readFile(resolved.pidFile, "utf8");
@@ -241,6 +294,7 @@ async function stopExistingKeybaseService(resolved) {
   } catch {
     // No pid file is fine; remove any stale socket/pid paths below.
   }
+  await stopLingeringKeybaseProcesses();
   await Promise.all([
     rm(resolved.socketFile, { force: true }),
     rm(resolved.pidFile, { force: true }),
