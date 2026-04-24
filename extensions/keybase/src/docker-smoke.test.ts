@@ -528,6 +528,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
                         { name: "/help", description: "Show help." },
                         { name: "status", description: "Show status." },
                         { name: "/commands", description: "List commands." },
+                        { name: "/subagents", description: "Manage subagents." },
                       ],
                     },
                   }),
@@ -607,7 +608,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
           id: "command-advertisements",
           status: "passed",
           details: expect.objectContaining({
-            observedCommands: ["/commands", "/help", "/status"],
+            observedCommands: ["/commands", "/help", "/status", "/subagents"],
           }),
         }),
         expect.objectContaining({
@@ -809,6 +810,303 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
       await expect(readFile(pairingStorePath, "utf8")).rejects.toMatchObject({
         code: "ENOENT",
       });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("runs the subagents list blackbox scenario", async () => {
+    const outputDir = await mkdtemp(path.join(os.tmpdir(), "keybase-blackbox-subagents-suite-"));
+    cleanups.push(async () => {
+      await rm(outputDir, { recursive: true, force: true });
+    });
+    await writeKeybaseDockerSmokeFiles({
+      outputDir,
+    });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_776_994_900_000);
+    let readAttempts = 0;
+
+    try {
+      const result = await runKeybaseDockerBlackboxSuite(
+        {
+          botUsername: "lbottestbot",
+          outputDir,
+          scenarioIds: ["subagents-list"],
+          team: "lbottest",
+        },
+        {
+          async runCommand(_command, args) {
+            if (args.includes("whoami")) {
+              return {
+                stderr: "",
+                stdout: args.includes("openclaw-keybase-sender")
+                  ? "lbottestuser2\n"
+                  : "lbottestbot\n",
+              };
+            }
+            if (args.includes("channels") && args.includes("status")) {
+              return {
+                stderr: "",
+                stdout: JSON.stringify({
+                  channelAccounts: {
+                    keybase: [
+                      {
+                        running: true,
+                        lastError: null,
+                        lastInboundAt: 1_776_994_901_000,
+                        lastOutboundAt: 1_776_994_902_000,
+                        lastStartAt: 1_776_994_900_000,
+                      },
+                    ],
+                  },
+                }),
+              };
+            }
+            const apiIndex = args.indexOf("-m");
+            if (apiIndex >= 0) {
+              const request = JSON.parse(args[apiIndex + 1]) as {
+                method?: string;
+                params?: {
+                  options?: {
+                    message?: { body?: string };
+                  };
+                };
+              };
+              if (request.method === "list") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      conversations: [
+                        {
+                          id: "conv-team",
+                          is_default_conv: true,
+                          channel: { name: "lbottest", members_type: "team" },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+              if (request.method === "send") {
+                return { stderr: "", stdout: JSON.stringify({ result: { id: 601 } }) };
+              }
+              if (request.method === "read") {
+                readAttempts += 1;
+                if (readAttempts === 1) {
+                  throw new Error(
+                    "dial unix /tmp/openclaw-keybase/keybased.sock: connect: no such file or directory",
+                  );
+                }
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      messages: [
+                        {
+                          msg: {
+                            id: 603,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_901_500,
+                            content: {
+                              type: "reaction",
+                              reaction: {
+                                b: ":eyes:",
+                                m: 601,
+                              },
+                            },
+                          },
+                        },
+                        {
+                          msg: {
+                            id: 602,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_994_902_000,
+                            content: {
+                              type: "text",
+                              text: {
+                                replyTo: 601,
+                                body: "active subagents:\n-----\n(none)",
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+            }
+            return { stderr: "", stdout: "" };
+          },
+        },
+      );
+
+      expect(result.passed).toBe(1);
+      expect(result.failed).toBe(0);
+      expect(readAttempts).toBe(2);
+      expect(result.scenarios).toEqual([
+        expect.objectContaining({
+          id: "subagents-list",
+          status: "passed",
+          details: expect.objectContaining({
+            ackReactionBody: ":eyes:",
+            replyPreview: "active subagents:\n-----\n(none)",
+            sentMessageId: "601",
+          }),
+        }),
+      ]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("runs the subagents spawn blackbox scenario", async () => {
+    const outputDir = await mkdtemp(path.join(os.tmpdir(), "keybase-blackbox-subagents-spawn-"));
+    cleanups.push(async () => {
+      await rm(outputDir, { recursive: true, force: true });
+    });
+    await writeKeybaseDockerSmokeFiles({
+      outputDir,
+    });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_776_995_000_000);
+    let readAttempts = 0;
+
+    try {
+      const result = await runKeybaseDockerBlackboxSuite(
+        {
+          botUsername: "lbottestbot",
+          outputDir,
+          scenarioIds: ["subagents-spawn"],
+          team: "lbottest",
+        },
+        {
+          async runCommand(_command, args) {
+            if (args.includes("whoami")) {
+              return {
+                stderr: "",
+                stdout: args.includes("openclaw-keybase-sender")
+                  ? "lbottestuser2\n"
+                  : "lbottestbot\n",
+              };
+            }
+            if (args.includes("channels") && args.includes("status")) {
+              return {
+                stderr: "",
+                stdout: JSON.stringify({
+                  channelAccounts: {
+                    keybase: [
+                      {
+                        running: true,
+                        lastError: null,
+                        lastInboundAt: 1_776_995_001_000,
+                        lastOutboundAt: 1_776_995_002_000,
+                        lastStartAt: 1_776_995_000_000,
+                      },
+                    ],
+                  },
+                }),
+              };
+            }
+            const apiIndex = args.indexOf("-m");
+            if (apiIndex >= 0) {
+              const request = JSON.parse(args[apiIndex + 1]) as {
+                method?: string;
+              };
+              if (request.method === "list") {
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      conversations: [
+                        {
+                          id: "conv-team",
+                          is_default_conv: true,
+                          channel: { name: "lbottest", members_type: "team" },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+              if (request.method === "send") {
+                return { stderr: "", stdout: JSON.stringify({ result: { id: 701 } }) };
+              }
+              if (request.method === "read") {
+                readAttempts += 1;
+                return {
+                  stderr: "",
+                  stdout: JSON.stringify({
+                    result: {
+                      messages: [
+                        {
+                          msg: {
+                            id: 703,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_995_001_500,
+                            content: {
+                              type: "reaction",
+                              reaction: {
+                                b: ":eyes:",
+                                m: 701,
+                              },
+                            },
+                          },
+                        },
+                        {
+                          msg: {
+                            id: 702,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_995_002_000,
+                            content: {
+                              type: "text",
+                              text: {
+                                replyTo: 701,
+                                body: "Spawned subagent main (session agent:main:subagent:test, run run-spaw).",
+                              },
+                            },
+                          },
+                        },
+                        {
+                          msg: {
+                            id: 704,
+                            sender: { username: "lbottestbot" },
+                            sent_at_ms: 1_776_995_003_000,
+                            content: {
+                              type: "text",
+                              text: {
+                                body: "keybase-subagents-spawn-1776995000000",
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  }),
+                };
+              }
+            }
+            return { stderr: "", stdout: "" };
+          },
+        },
+      );
+
+      expect(result.passed).toBe(1);
+      expect(result.failed).toBe(0);
+      expect(readAttempts).toBeGreaterThanOrEqual(1);
+      expect(result.scenarios).toEqual([
+        expect.objectContaining({
+          id: "subagents-spawn",
+          status: "passed",
+          details: expect.objectContaining({
+            ackReactionBody: ":eyes:",
+            completionMessageId: "704",
+            completionPreview: "keybase-subagents-spawn-1776995000000",
+            replyPreview: "Spawned subagent main (session agent:main:subagent:test, run run-spaw).",
+            sentMessageId: "701",
+          }),
+        }),
+      ]);
     } finally {
       now.mockRestore();
     }

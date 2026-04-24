@@ -49,7 +49,9 @@ export type KeybaseDockerBlackboxScenarioId =
   | "dm-pairing"
   | "help-command"
   | "mention-gating"
-  | "restart-resume";
+  | "restart-resume"
+  | "subagents-list"
+  | "subagents-spawn";
 
 export interface KeybaseDockerBlackboxScenarioResult {
   details?: Record<string, unknown>;
@@ -88,6 +90,8 @@ const DEFAULT_BLACKBOX_SCENARIOS: readonly KeybaseDockerBlackboxScenarioId[] = [
   "chunked-commands",
   "dm-pairing",
   "dm-canary",
+  "subagents-list",
+  "subagents-spawn",
   "mention-gating",
   "allowlist-block",
   "restart-resume",
@@ -1017,6 +1021,7 @@ async function waitForBlackboxReply(params: {
 }> {
   const deadline = Date.now() + params.timeoutMs;
   let lastStatusError: string | null = null;
+  let lastReadError: string | null = null;
   const expectedAckReaction =
     params.expectedAckReaction === false
       ? undefined
@@ -1038,13 +1043,21 @@ async function waitForBlackboxReply(params: {
       lastStatusError = String(error);
     }
 
-    const messages = await readKeybaseMessagesInSender({
-      composeFile: params.composeFile,
-      conversation: params.conversation,
-      cwd: params.cwd,
-      envFile: params.envFile,
-      runCommand: params.runCommand,
-    });
+    let messages: KeybaseMessageSummary[];
+    try {
+      messages = await readKeybaseMessagesInSender({
+        composeFile: params.composeFile,
+        conversation: params.conversation,
+        cwd: params.cwd,
+        envFile: params.envFile,
+        runCommand: params.runCommand,
+      });
+      lastReadError = null;
+    } catch (error) {
+      lastReadError = formatUnknownError(error);
+      await sleep(3000);
+      continue;
+    }
     const reply = findBotReplyToMessage({
       botUsername: params.botUsername,
       messages,
@@ -1076,7 +1089,74 @@ async function waitForBlackboxReply(params: {
     await sleep(3000);
   }
   throw new Error(
-    `Timed out waiting for Keybase blackbox reply; last channel error: ${lastStatusError ?? "none"}`,
+    `Timed out waiting for Keybase blackbox reply; last channel error: ${
+      lastStatusError ?? "none"
+    }; last sender read error: ${lastReadError ?? "none"}`,
+  );
+}
+
+async function waitForBotTextContaining(params: {
+  botUsername: string;
+  conversation: KeybaseBlackboxConversation;
+  composeFile: string;
+  cwd: string;
+  envFile: string;
+  excludeMessageIds?: readonly string[];
+  runCommand: RunCommand;
+  startedAt: number;
+  text: string;
+  timeoutMs: number;
+}): Promise<{
+  replyBody: string;
+  replyMessageId: string;
+  replyPreview: string;
+}> {
+  const deadline = Date.now() + params.timeoutMs;
+  const normalizedBot = normalizeUsername(params.botUsername);
+  const excluded = new Set((params.excludeMessageIds ?? []).map(normalizeMessageId));
+  let lastReadError: string | null = null;
+  while (Date.now() < deadline) {
+    let messages: KeybaseMessageSummary[];
+    try {
+      messages = await readKeybaseMessagesInSender({
+        composeFile: params.composeFile,
+        conversation: params.conversation,
+        cwd: params.cwd,
+        envFile: params.envFile,
+        runCommand: params.runCommand,
+      });
+      lastReadError = null;
+    } catch (error) {
+      lastReadError = formatUnknownError(error);
+      await sleep(3000);
+      continue;
+    }
+    const match = messages.find((entry) => {
+      const msg = entry.msg;
+      const messageId = normalizeMessageId(msg?.id);
+      return Boolean(
+        msg &&
+        readMessageSender(entry) === normalizedBot &&
+        msg.content?.type === "text" &&
+        !excluded.has(messageId) &&
+        (msg.sent_at_ms ?? 0) >= params.startedAt &&
+        readMessageBody(entry).includes(params.text),
+      );
+    });
+    if (match) {
+      const replyBody = readMessageBody(match);
+      return {
+        replyBody,
+        replyMessageId: normalizeMessageId(match.msg?.id),
+        replyPreview: replyBody.slice(0, 240),
+      };
+    }
+    await sleep(3000);
+  }
+  throw new Error(
+    `Timed out waiting for Keybase bot text containing "${params.text}"; last sender read error: ${
+      lastReadError ?? "none"
+    }`,
   );
 }
 
@@ -1104,6 +1184,7 @@ async function waitForChunkedBotReply(params: {
 }> {
   const deadline = Date.now() + params.timeoutMs;
   let lastStatusError: string | null = null;
+  let lastReadError: string | null = null;
   const expectedAckReaction =
     params.expectedAckReaction === false
       ? undefined
@@ -1125,14 +1206,22 @@ async function waitForChunkedBotReply(params: {
       lastStatusError = String(error);
     }
 
-    const messages = await readKeybaseMessagesInSender({
-      composeFile: params.composeFile,
-      conversation: params.conversation,
-      cwd: params.cwd,
-      envFile: params.envFile,
-      num: 50,
-      runCommand: params.runCommand,
-    });
+    let messages: KeybaseMessageSummary[];
+    try {
+      messages = await readKeybaseMessagesInSender({
+        composeFile: params.composeFile,
+        conversation: params.conversation,
+        cwd: params.cwd,
+        envFile: params.envFile,
+        num: 50,
+        runCommand: params.runCommand,
+      });
+      lastReadError = null;
+    } catch (error) {
+      lastReadError = formatUnknownError(error);
+      await sleep(3000);
+      continue;
+    }
     const replies = findBotTextRepliesToMessage({
       botUsername: params.botUsername,
       messages,
@@ -1172,7 +1261,9 @@ async function waitForChunkedBotReply(params: {
     await sleep(3000);
   }
   throw new Error(
-    `Timed out waiting for chunked Keybase bot reply; last channel error: ${lastStatusError ?? "none"}`,
+    `Timed out waiting for chunked Keybase bot reply; last channel error: ${
+      lastStatusError ?? "none"
+    }; last sender read error: ${lastReadError ?? "none"}`,
   );
 }
 
@@ -1189,13 +1280,30 @@ async function waitForNoAdditionalBotTextReply(params: {
   startedAt: number;
 }): Promise<void> {
   await sleep(Math.max(0, params.quietMs));
-  const messages = await readKeybaseMessagesInSender({
-    composeFile: params.composeFile,
-    conversation: params.conversation,
-    cwd: params.cwd,
-    envFile: params.envFile,
-    runCommand: params.runCommand,
-  });
+  let messages: KeybaseMessageSummary[] = [];
+  let lastReadError: string | null = null;
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    try {
+      messages = await readKeybaseMessagesInSender({
+        composeFile: params.composeFile,
+        conversation: params.conversation,
+        cwd: params.cwd,
+        envFile: params.envFile,
+        runCommand: params.runCommand,
+      });
+      lastReadError = null;
+      break;
+    } catch (error) {
+      lastReadError = formatUnknownError(error);
+      await sleep(3000);
+    }
+  }
+  if (lastReadError) {
+    throw new Error(
+      `Timed out checking for extra Keybase bot replies; last sender read error: ${lastReadError}`,
+    );
+  }
   const normalizedBot = normalizeUsername(params.botUsername);
   const extraReply = messages.find((entry) => {
     const msg = entry.msg;
@@ -1227,14 +1335,25 @@ async function waitForNoBotResponse(params: {
   startedAt: number;
 }): Promise<void> {
   const deadline = Date.now() + params.quietMs;
+  let sawSuccessfulRead = false;
+  let lastReadError: string | null = null;
   while (Date.now() < deadline) {
-    const messages = await readKeybaseMessagesInSender({
-      composeFile: params.composeFile,
-      conversation: params.conversation,
-      cwd: params.cwd,
-      envFile: params.envFile,
-      runCommand: params.runCommand,
-    });
+    let messages: KeybaseMessageSummary[];
+    try {
+      messages = await readKeybaseMessagesInSender({
+        composeFile: params.composeFile,
+        conversation: params.conversation,
+        cwd: params.cwd,
+        envFile: params.envFile,
+        runCommand: params.runCommand,
+      });
+      sawSuccessfulRead = true;
+      lastReadError = null;
+    } catch (error) {
+      lastReadError = formatUnknownError(error);
+      await sleep(Math.min(3000, Math.max(250, params.quietMs)));
+      continue;
+    }
     const response = findBotResponseToMessage({
       botUsername: params.botUsername,
       messages,
@@ -1247,6 +1366,11 @@ async function waitForNoBotResponse(params: {
       );
     }
     await sleep(Math.min(3000, Math.max(250, params.quietMs)));
+  }
+  if (!sawSuccessfulRead && lastReadError) {
+    throw new Error(
+      `Timed out checking for absent Keybase bot response; last sender read error: ${lastReadError}`,
+    );
   }
 }
 
@@ -1857,15 +1981,114 @@ async function runCommandAdvertisementProbe(params: {
 }): Promise<Record<string, unknown>> {
   const result = await waitForKeybaseCommandAdvertisements({
     context: params.context,
-    expectedCommands: ["/help", "/status", "/commands"],
+    expectedCommands: ["/help", "/status", "/commands", "/subagents"],
     timeoutMs: params.timeoutMs,
   });
   return {
     commandCount: result.commandCount,
     observedCommands: result.commands.filter((command) =>
-      ["/commands", "/help", "/status"].includes(command),
+      ["/commands", "/help", "/status", "/subagents"].includes(command),
     ),
   };
+}
+
+async function runSubagentsListProbe(params: {
+  context: KeybaseBlackboxContext;
+  timeoutMs: number;
+}): Promise<Record<string, unknown>> {
+  const restoreConfig = await installAllowedGroupSender(params.context);
+  try {
+    await restartKeybaseGateway(params.context);
+    const startedAt = Date.now();
+    const sentMessageId = await sendKeybaseBlackboxMessage({
+      body: `@${params.context.botUsername} /subagents list`,
+      context: params.context,
+    });
+    const reply = await waitForBlackboxReply({
+      botUsername: params.context.botUsername,
+      composeFile: params.context.composeFile,
+      conversation: { conversation_id: params.context.conversationId },
+      cwd: params.context.outputDir,
+      envFile: params.context.envFile,
+      expectedAckReaction: DEFAULT_BLACKBOX_ACK_REACTION,
+      runCommand: params.context.runCommand,
+      sentMessageId,
+      startedAt,
+      timeoutMs: params.timeoutMs,
+    });
+    if (!reply.replyBody.includes("active subagents:")) {
+      throw new Error(`Unexpected /subagents list reply: ${reply.replyBody}`);
+    }
+    return {
+      ...(reply.ackReactionBody ? { ackReactionBody: reply.ackReactionBody } : {}),
+      ...(reply.ackReactionMessageId ? { ackReactionMessageId: reply.ackReactionMessageId } : {}),
+      inboundAt: reply.inboundAt,
+      outboundAt: reply.outboundAt,
+      replyPreview: reply.replyPreview,
+      sentMessageId,
+    };
+  } finally {
+    await restoreConfig();
+    await restartKeybaseGateway(params.context);
+  }
+}
+
+async function runSubagentsSpawnProbe(params: {
+  context: KeybaseBlackboxContext;
+  marker: string;
+  timeoutMs: number;
+}): Promise<Record<string, unknown>> {
+  const restoreConfig = await installAllowedGroupSender(params.context);
+  try {
+    await restartKeybaseGateway(params.context);
+    const startedAt = Date.now();
+    const sentMessageId = await sendKeybaseBlackboxMessage({
+      body: `@${params.context.botUsername} /subagents spawn main reply exactly: ${params.marker}`,
+      context: params.context,
+    });
+    const ackReply = await waitForBlackboxReply({
+      botUsername: params.context.botUsername,
+      composeFile: params.context.composeFile,
+      conversation: { conversation_id: params.context.conversationId },
+      cwd: params.context.outputDir,
+      envFile: params.context.envFile,
+      expectedAckReaction: DEFAULT_BLACKBOX_ACK_REACTION,
+      runCommand: params.context.runCommand,
+      sentMessageId,
+      startedAt,
+      timeoutMs: params.timeoutMs,
+    });
+    if (!ackReply.replyBody.includes("Spawned subagent main")) {
+      throw new Error(`Unexpected /subagents spawn reply: ${ackReply.replyBody}`);
+    }
+    const completionReply = await waitForBotTextContaining({
+      botUsername: params.context.botUsername,
+      composeFile: params.context.composeFile,
+      conversation: { conversation_id: params.context.conversationId },
+      cwd: params.context.outputDir,
+      envFile: params.context.envFile,
+      excludeMessageIds: [ackReply.replyMessageId],
+      runCommand: params.context.runCommand,
+      startedAt,
+      text: params.marker,
+      timeoutMs: params.timeoutMs,
+    });
+    return {
+      ...(ackReply.ackReactionBody ? { ackReactionBody: ackReply.ackReactionBody } : {}),
+      ...(ackReply.ackReactionMessageId
+        ? { ackReactionMessageId: ackReply.ackReactionMessageId }
+        : {}),
+      completionMessageId: completionReply.replyMessageId,
+      completionPreview: completionReply.replyPreview,
+      inboundAt: ackReply.inboundAt,
+      outboundAt: ackReply.outboundAt,
+      replyPreview: ackReply.replyPreview,
+      sentMessageId,
+    };
+  } finally {
+    await restoreConfig();
+    await restartKeybaseGateway(params.context);
+  }
 }
 
 async function runChunkedCommandsProbe(params: {
@@ -2002,14 +2225,23 @@ async function waitForPairingChallengeReply(params: {
   timeoutMs: number;
 }): Promise<Record<string, unknown>> {
   const deadline = Date.now() + params.timeoutMs;
+  let lastReadError: string | null = null;
   while (Date.now() < deadline) {
-    const messages = await readKeybaseMessagesInSender({
-      composeFile: params.composeFile,
-      conversation: params.conversation,
-      cwd: params.cwd,
-      envFile: params.envFile,
-      runCommand: params.runCommand,
-    });
+    let messages: KeybaseMessageSummary[];
+    try {
+      messages = await readKeybaseMessagesInSender({
+        composeFile: params.composeFile,
+        conversation: params.conversation,
+        cwd: params.cwd,
+        envFile: params.envFile,
+        runCommand: params.runCommand,
+      });
+      lastReadError = null;
+    } catch (error) {
+      lastReadError = formatUnknownError(error);
+      await sleep(3000);
+      continue;
+    }
     const reply = findBotReplyToMessage({
       botUsername: params.botUsername,
       messages,
@@ -2026,7 +2258,11 @@ async function waitForPairingChallengeReply(params: {
     }
     await sleep(3000);
   }
-  throw new Error("Timed out waiting for Keybase DM pairing challenge reply");
+  throw new Error(
+    `Timed out waiting for Keybase DM pairing challenge reply; last sender read error: ${
+      lastReadError ?? "none"
+    }`,
+  );
 }
 
 async function runDirectMessagePairingProbe(params: {
@@ -2192,6 +2428,19 @@ export async function runKeybaseDockerBlackboxSuite(
             context,
             marker,
             prefix: "keybase restart resume ok",
+            timeoutMs,
+          });
+          break;
+        case "subagents-list":
+          details = await runSubagentsListProbe({
+            context,
+            timeoutMs,
+          });
+          break;
+        case "subagents-spawn":
+          details = await runSubagentsSpawnProbe({
+            context,
+            marker,
             timeoutMs,
           });
           break;
