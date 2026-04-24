@@ -398,7 +398,7 @@ describe("keybaseGatewayAdapter.startAccount", () => {
     expect(stop).toHaveBeenCalledOnce();
   });
 
-  it("strips the bot mention from tagged group command bodies", async () => {
+  it("strips the bot mention from tagged group approval command bodies", async () => {
     const stop = vi.fn();
     mocks.startKeybaseApiListen.mockReturnValue({
       child: {} as never,
@@ -432,7 +432,7 @@ describe("keybaseGatewayAdapter.startAccount", () => {
     };
     args.onEvent(
       buildTextEvent({
-        body: "@openclaw /help",
+        body: "@openclaw /approve abc12345 allow-once",
         conversationId: "conv-team-command",
         id: 100,
         teamName: "lightninglabs",
@@ -448,9 +448,9 @@ describe("keybaseGatewayAdapter.startAccount", () => {
     const dispatchCall = harness.dispatchReplyWithBufferedBlockDispatcher.mock.calls[0]?.[0] as
       | { ctx?: Record<string, unknown> }
       | undefined;
-    expect(dispatchCall?.ctx?.RawBody).toBe("@openclaw /help");
-    expect(dispatchCall?.ctx?.CommandBody).toBe("/help");
-    expect(dispatchCall?.ctx?.BodyForCommands).toBe("/help");
+    expect(dispatchCall?.ctx?.RawBody).toBe("@openclaw /approve abc12345 allow-once");
+    expect(dispatchCall?.ctx?.CommandBody).toBe("/approve abc12345 allow-once");
+    expect(dispatchCall?.ctx?.BodyForCommands).toBe("/approve abc12345 allow-once");
     expect(dispatchCall?.ctx?.BotUsername).toBe("openclaw");
 
     abort.abort();

@@ -135,7 +135,10 @@ Scope:
 
 - bot command advertisements (implemented: startup syncs slash command catalog through
   Keybase `advertisecommands`; `commands.native=false` clears published commands)
-- native or text-fallback approvals
+- native or text-fallback approvals (implemented: shared `/approve` text
+  fallback works in authorized Keybase DMs and tagged team chats; reaction
+  shortcuts are intentionally deferred until approval prompt bindings are
+  durable)
 - better outbound formatting and chunking (implemented: default markdown-aware
   text chunking with `textChunkLimit`)
 - richer directory and resolver behavior

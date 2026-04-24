@@ -155,6 +155,19 @@ Notes:
 - `commands.nativeSkills` controls whether user-invocable skill commands are
   included in the advertised catalog.
 
+## Approvals
+
+Keybase uses the shared text-command approval fallback. When an exec or plugin
+approval prompt includes a command such as `/approve <id> allow-once`, send that
+command in the same authorized DM or tagged team chat. In team chats, tagging the
+bot also works, for example `@openclaw /approve <id> allow-once`; OpenClaw strips
+the bot mention before dispatching the shared `/approve` command.
+
+Reaction-based approval shortcuts are not enabled for Keybase yet. The Keybase
+listener can parse reaction events, but approval reactions need a durable mapping
+from a bot-authored approval prompt to the approval id and decision before they
+are safe to treat as approvals.
+
 ## Ack reactions
 
 Keybase exposes reactions through the `chat api` `reaction` method. OpenClaw uses

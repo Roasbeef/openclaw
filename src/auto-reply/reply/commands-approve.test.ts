@@ -139,6 +139,20 @@ const signalApproveTestPlugin: ChannelPlugin = {
   }),
 };
 
+const keybaseApproveTestPlugin: ChannelPlugin = {
+  ...createChannelTestPluginBase({
+    id: "keybase",
+    label: "Keybase",
+    docsPath: "/channels/keybase",
+    capabilities: {
+      chatTypes: ["direct", "group"],
+      reactions: true,
+      media: true,
+      nativeCommands: true,
+    },
+  }),
+};
+
 type TelegramTestAccountConfig = {
   enabled?: boolean;
   allowFrom?: Array<string | number>;
@@ -361,6 +375,7 @@ function setApprovePluginRegistry(): void {
       { pluginId: "slack", plugin: slackApproveTestPlugin, source: "test" },
       { pluginId: "whatsapp", plugin: whatsappApproveTestPlugin, source: "test" },
       { pluginId: "signal", plugin: signalApproveTestPlugin, source: "test" },
+      { pluginId: "keybase", plugin: keybaseApproveTestPlugin, source: "test" },
       { pluginId: "telegram", plugin: telegramApproveTestPlugin, source: "test" },
     ]),
   );
@@ -699,6 +714,37 @@ describe("handleApproveCommand", () => {
         Provider: "signal",
         Surface: "signal",
         SenderId: "+15551239999",
+      },
+    );
+    params.command.isAuthorizedSender = true;
+
+    const result = await handleApproveCommand(params, true);
+    expect(result?.shouldContinue).toBe(false);
+    expect(result?.reply?.text).toContain("Approval allow-once submitted");
+    expect(callGatewayMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "exec.approval.resolve",
+        params: { id: "abc12345", decision: "allow-once" },
+      }),
+    );
+  });
+
+  it("keeps same-chat /approve available to authorized Keybase senders", async () => {
+    callGatewayMock.mockResolvedValue({ ok: true });
+    const params = buildApproveParams(
+      "/approve abc12345 allow-once",
+      {
+        commands: { text: true },
+        channels: {
+          keybase: {
+            allowFrom: ["roasbeef"],
+          },
+        },
+      } as OpenClawConfig,
+      {
+        Provider: "keybase",
+        Surface: "keybase",
+        SenderId: "roasbeef",
       },
     );
     params.command.isAuthorizedSender = true;
