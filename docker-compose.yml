@@ -1,6 +1,10 @@
 services:
   openclaw-gateway:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
+    build:
+      context: .
+      args:
+        OPENCLAW_INSTALL_BROWSER: "1"
     environment:
       HOME: /home/node
       TERM: xterm-256color
@@ -10,9 +14,17 @@ services:
       CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
       TZ: ${OPENCLAW_TZ:-UTC}
+      ALPHA_ADVANTAGE_API_KEY: ${ALPHA_ADVANTAGE_API_KEY:-}
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
+      GH_TOKEN: ${GH_TOKEN:-}
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - ${HOME}/.claude:/home/node/.claude
+      - ${HOME}/.local/bin/claude:/usr/local/bin/claude:ro
+      - ${HOME}/.npm-global:/home/node/.npm-global
+      - ${HOME}/.xurl:/home/node/.xurl
+      - ${HOME}/.openclaw-codex:/home/node/.codex
       ## Uncomment the lines below to enable sandbox isolation
       ## (agents.defaults.sandbox). Requires Docker CLI in the image
       ## (build with --build-arg OPENCLAW_INSTALL_DOCKER_CLI=1) or use
@@ -70,6 +82,9 @@ services:
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - ${HOME}/.claude:/home/node/.claude
+      - ${HOME}/.local/bin/claude:/usr/local/bin/claude:ro
+      - ${HOME}/.xurl:/home/node/.xurl
     stdin_open: true
     tty: true
     init: true

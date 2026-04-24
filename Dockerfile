@@ -166,7 +166,7 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
       DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --no-install-recommends; \
     fi && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      procps hostname curl git lsof openssl
+      procps hostname curl git lsof openssl gh
 
 RUN chown node:node /app
 
@@ -253,6 +253,15 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         docker-ce-cli docker-compose-plugin; \
     fi
+
+# Install agent-browser globally so the skill works without per-container reinstall.
+# Pinned for reproducible builds; bump when upgrading agent-browser.
+RUN npm install -g agent-browser@0.26.0
+
+# Configure npm global prefix for the non-root node user so runtime `npm install -g`
+# writes land in /home/node/.npm-global (volume-mountable for persistence).
+ENV NPM_CONFIG_PREFIX=/home/node/.npm-global
+ENV PATH="/home/node/.npm-global/bin:${PATH}"
 
 # Expose the CLI binary without requiring npm global writes as non-root.
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
