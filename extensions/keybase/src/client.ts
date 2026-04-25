@@ -417,15 +417,21 @@ export function startKeybaseApiListen(
     onError?: (error: Error) => void;
     onEvent: (event: KeybaseListenEvent) => void;
     onExit?: (info: KeybaseListenExitInfo) => void;
+    restartDelayMs?: number;
+    restartMaxAttempts?: number;
+    restartOnExit?: boolean;
   } & KeybaseCliTransportOptions,
 ): KeybaseListenHandle {
   const spawnCommand = params.spawnCommand ?? spawn;
   const maxBootstrapRetries = params.bootstrapRetryMaxAttempts ?? 8;
   const bootstrapRetryDelayMs = params.bootstrapRetryDelayMs ?? 750;
+  const restartDelayMs = params.restartDelayMs ?? 2_000;
+  const maxRestartAttempts = params.restartMaxAttempts ?? Number.POSITIVE_INFINITY;
   let activeChild: ChildProcessByStdio<null, Readable, Readable> | null = null;
   let activeReader: ReturnType<typeof createInterface> | null = null;
   let retryTimer: NodeJS.Timeout | null = null;
   let retryAttempts = 0;
+  let restartAttempts = 0;
   let stopped = false;
 
   const clearRetryTimer = () => {
@@ -443,7 +449,17 @@ export function startKeybaseApiListen(
     }
   };
 
-  const launch = () => {
+  function scheduleLaunch(delayMs: number) {
+    clearRetryTimer();
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      if (!stopped) {
+        launch();
+      }
+    }, delayMs);
+  }
+
+  function launch() {
     const child = spawnCommand(
       resolveBinary(params),
       buildKeybaseApiListenArgs(params.listen, params),
@@ -481,6 +497,7 @@ export function startKeybaseApiListen(
 
     child.on("close", (code, signal) => {
       if (activeReader === reader) {
+        reader.close();
         activeReader = null;
       }
       if (activeChild === child) {
@@ -493,15 +510,16 @@ export function startKeybaseApiListen(
         retryAttempts < maxBootstrapRetries
       ) {
         retryAttempts += 1;
-        retryTimer = setTimeout(() => {
-          retryTimer = null;
-          launch();
-        }, bootstrapRetryDelayMs);
+        scheduleLaunch(bootstrapRetryDelayMs);
         return;
       }
       params.onExit?.({ code, signal, stderr });
+      if (!stopped && params.restartOnExit && restartAttempts < maxRestartAttempts) {
+        restartAttempts += 1;
+        scheduleLaunch(restartDelayMs);
+      }
     });
-  };
+  }
 
   launch();
 

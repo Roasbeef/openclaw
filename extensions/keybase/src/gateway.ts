@@ -803,6 +803,7 @@ export const keybaseGatewayAdapter: NonNullable<ChannelPlugin<ResolvedKeybaseAcc
             listen: {
               hideExploding: true,
             },
+            restartOnExit: true,
             onEvent: (event) => {
               void handleKeybaseListenEvent({ account, ctx, event, statusSink }).catch((error) => {
                 ctx.log?.error?.(

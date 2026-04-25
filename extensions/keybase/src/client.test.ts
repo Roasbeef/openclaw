@@ -263,4 +263,59 @@ describe("Keybase CLI transport", () => {
       vi.useRealTimers();
     }
   });
+
+  it("restarts api-listen after an unexpected post-startup exit", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstChild = createListenChild();
+      const secondChild = createListenChild();
+      const spawnCommand = vi.fn().mockReturnValueOnce(firstChild).mockReturnValueOnce(secondChild);
+      const onExit = vi.fn();
+
+      const handle = startKeybaseApiListen({
+        onEvent: vi.fn(),
+        onExit,
+        restartDelayMs: 250,
+        restartOnExit: true,
+        spawnCommand,
+      });
+
+      firstChild.emit("close", 0, null);
+      expect(onExit).toHaveBeenCalledWith({ code: 0, signal: null, stderr: "" });
+      expect(spawnCommand).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(spawnCommand).toHaveBeenCalledTimes(2);
+      expect(handle.child).toBe(secondChild);
+
+      handle.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a scheduled api-listen restart when stopped", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstChild = createListenChild();
+      const secondChild = createListenChild();
+      const spawnCommand = vi.fn().mockReturnValueOnce(firstChild).mockReturnValueOnce(secondChild);
+
+      const handle = startKeybaseApiListen({
+        onEvent: vi.fn(),
+        restartDelayMs: 250,
+        restartOnExit: true,
+        spawnCommand,
+      });
+
+      firstChild.emit("close", 1, null);
+      handle.stop();
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(spawnCommand).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
