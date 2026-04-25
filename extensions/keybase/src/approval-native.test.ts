@@ -99,4 +99,17 @@ describe("keybase native approvals", () => {
       }),
     ).toEqual(["conv:conv-1", "dm:roasbeef"]);
   });
+
+  it("derives implicit-team reaction target keys from multi-party Keybase DMs", () => {
+    expect(
+      resolveKeybaseApprovalReactionTargetKeys({
+        conversationId: "conv-1",
+        senderUsername: "Roasbeef",
+        channel: {
+          name: "lbottestbot,roasbeef,third",
+          membersType: "impteamnative",
+        },
+      }),
+    ).toEqual(["conv:conv-1", "impteam:lbottestbot,roasbeef,third"]);
+  });
 });

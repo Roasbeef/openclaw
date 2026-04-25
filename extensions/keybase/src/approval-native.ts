@@ -25,10 +25,10 @@ import {
   shouldHandleKeybaseApprovalRequest,
 } from "./exec-approvals.js";
 import {
+  buildKeybaseInboundGroupId,
   buildKeybaseDmTarget,
   normalizeKeybaseGroupKey,
   normalizeKeybaseTarget,
-  parseKeybaseTarget,
 } from "./targets.js";
 import type { CoreConfig } from "./types.js";
 
@@ -294,16 +294,18 @@ export function resolveKeybaseApprovalReactionTargetKeys(params: {
   const channel = params.channel;
   let matchedGroup = false;
   if (channel?.name) {
-    const isTeam = Boolean(channel.topicName) || channel.membersType?.toLowerCase() === "team";
-    const parsed = parseKeybaseTarget(
-      isTeam ? `team:${channel.name}#${channel.topicName || "general"}` : channel.name,
+    const groupKey = normalizeKeybaseGroupKey(
+      buildKeybaseInboundGroupId({
+        channel: {
+          membersType: channel.membersType,
+          name: channel.name,
+          topicName: channel.topicName,
+        },
+      }) ?? "",
     );
-    if (parsed?.chatType === "group") {
-      const groupKey = normalizeKeybaseGroupKey(parsed.normalized);
-      if (groupKey) {
-        keys.add(groupKey);
-        matchedGroup = true;
-      }
+    if (groupKey) {
+      keys.add(groupKey);
+      matchedGroup = true;
     }
   }
   if (!matchedGroup) {

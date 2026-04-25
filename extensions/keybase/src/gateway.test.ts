@@ -112,8 +112,10 @@ function createRuntimeHarness(options?: { commandAuthorized?: boolean }) {
 function buildTextEvent(params: {
   atMentionUsernames?: string[];
   body: string;
+  channelName?: string;
   conversationId?: string;
   id?: number;
+  membersType?: string;
   senderUsername?: string;
   teamName?: string;
   topicName?: string;
@@ -127,7 +129,8 @@ function buildTextEvent(params: {
       conversationId: params.conversationId ?? "conv-1",
       atMentionUsernames: params.atMentionUsernames ?? [],
       channel: {
-        name: params.teamName ?? "openclaw,sender",
+        name: params.channelName ?? params.teamName ?? "openclaw,sender",
+        ...(params.membersType ? { membersType: params.membersType } : {}),
         ...(params.topicName ? { membersType: "team", topicName: params.topicName } : {}),
       },
       sender: {
@@ -316,6 +319,49 @@ describe("keybaseGatewayAdapter.startAccount", () => {
         body: "@openclaw hello",
         teamName: "lightninglabs",
         topicName: "lbottest",
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(harness.recordInboundSession).not.toHaveBeenCalled();
+      expect(harness.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    });
+
+    abort.abort();
+    await task;
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("blocks multi-party implicit-team DMs that are not group allowlisted", async () => {
+    const stop = vi.fn();
+    mocks.startKeybaseApiListen.mockReturnValue({
+      child: {} as never,
+      stop,
+    });
+    const harness = createRuntimeHarness();
+    const abort = new AbortController();
+    const ctx = createStartAccountContext({
+      account: buildAccount({
+        allowFrom: ["sender"],
+        dmPolicy: "allowlist",
+        groupPolicy: "allowlist",
+        groups: {},
+      }),
+      abortSignal: abort.signal,
+    });
+    Object.assign(ctx, { channelRuntime: harness.channelRuntime });
+
+    const task = keybaseGatewayAdapter.startAccount!(ctx);
+
+    await vi.waitFor(() => expect(mocks.startKeybaseApiListen).toHaveBeenCalledOnce());
+    const args = mocks.startKeybaseApiListen.mock.calls[0]?.[0] as {
+      onEvent: (event: KeybaseListenEvent) => void;
+    };
+    args.onEvent(
+      buildTextEvent({
+        body: "@openclaw hello from a multi-party DM",
+        channelName: "openclaw,sender,third",
+        membersType: "impteamnative",
       }),
     );
 

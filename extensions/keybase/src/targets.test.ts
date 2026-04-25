@@ -77,6 +77,36 @@ describe("Keybase target parsing", () => {
     ).toBe("group");
   });
 
+  it("treats multi-party implicit teams as group chat", () => {
+    expect(
+      inferKeybaseInboundChatType({
+        channel: {
+          membersType: "impteamnative",
+          name: "openclaw,sender",
+        },
+      }),
+    ).toBe("direct");
+    expect(
+      inferKeybaseInboundChatType({
+        channel: {
+          membersType: "impteamnative",
+          name: "third,openclaw,sender",
+        },
+      }),
+    ).toBe("group");
+    expect(
+      buildKeybaseInboundGroupId({
+        channel: {
+          membersType: "impteamnative",
+          name: "third,openclaw,sender",
+        },
+      }),
+    ).toBe("impteam:openclaw,sender,third");
+    expect(normalizeKeybaseGroupKey("impteam:Third,openclaw,sender")).toBe(
+      "impteam:openclaw,sender,third",
+    );
+  });
+
   it("canonicalizes group routing keys separately from outbound targets", () => {
     expect(buildKeybaseGroupTarget("LightningLabs", "Ops")).toBe("team:LightningLabs#Ops");
     expect(normalizeKeybaseGroupKey("team:LightningLabs#Ops")).toBe("team:lightninglabs#ops");

@@ -1,6 +1,7 @@
 import type { KeybaseConversationRef } from "./protocol.js";
 
 const DEFAULT_KEYBASE_TEAM_TOPIC = "general";
+const KEYBASE_IMPLICIT_TEAM_GROUP_PREFIX = "impteam:";
 
 export interface ParsedKeybaseTarget {
   conversationId?: string;
@@ -21,6 +22,23 @@ function normalizeDelimitedUsernames(value: string): string[] {
         .filter(Boolean),
     ),
   ].toSorted((left, right) => left.localeCompare(right));
+}
+
+function normalizeKeybaseImplicitTeamGroupKey(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed || !trimmed.toLowerCase().startsWith(KEYBASE_IMPLICIT_TEAM_GROUP_PREFIX)) {
+    return undefined;
+  }
+  const usernames = normalizeDelimitedUsernames(
+    trimmed.slice(KEYBASE_IMPLICIT_TEAM_GROUP_PREFIX.length),
+  );
+  return usernames.length > 2
+    ? `${KEYBASE_IMPLICIT_TEAM_GROUP_PREFIX}${usernames.join(",")}`
+    : undefined;
+}
+
+function normalizeKeybaseImplicitTeamChannelName(name: string): string | undefined {
+  return normalizeKeybaseImplicitTeamGroupKey(`${KEYBASE_IMPLICIT_TEAM_GROUP_PREFIX}${name}`);
 }
 
 export function normalizeKeybaseUsername(value: string): string | undefined {
@@ -134,6 +152,10 @@ export function normalizeKeybaseGroupKey(raw: string): string | undefined {
   if (raw.trim() === "*") {
     return "*";
   }
+  const implicitTeamKey = normalizeKeybaseImplicitTeamGroupKey(raw);
+  if (implicitTeamKey) {
+    return implicitTeamKey;
+  }
   const parsed = parseKeybaseTarget(raw);
   if (!parsed || parsed.chatType !== "group" || !parsed.teamName || !parsed.topicName) {
     return undefined;
@@ -184,10 +206,14 @@ export function resolveKeybaseConversationRef(
 export function inferKeybaseInboundChatType(params: {
   channel: {
     membersType?: string;
+    name?: string;
     topicName?: string;
   };
 }): "direct" | "group" {
   if (params.channel.membersType?.toLowerCase() === "team" || params.channel.topicName) {
+    return "group";
+  }
+  if (params.channel.name && normalizeKeybaseImplicitTeamChannelName(params.channel.name)) {
     return "group";
   }
   return "direct";
@@ -202,6 +228,9 @@ export function buildKeybaseInboundGroupId(params: {
 }): string | undefined {
   if (!params.channel.name) {
     return undefined;
+  }
+  if (params.channel.membersType?.toLowerCase() !== "team" && !params.channel.topicName) {
+    return normalizeKeybaseImplicitTeamChannelName(params.channel.name);
   }
   const topicName =
     params.channel.topicName ??
