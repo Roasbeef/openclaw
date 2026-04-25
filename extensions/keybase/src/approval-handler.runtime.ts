@@ -27,6 +27,7 @@ import {
   editKeybaseText,
   sendKeybaseReaction,
   sendKeybaseText,
+  sendKeybaseTextChunks,
 } from "./runtime.js";
 import { normalizeKeybaseGroupKey, normalizeKeybaseTarget } from "./targets.js";
 import type { CoreConfig } from "./types.js";
@@ -51,6 +52,11 @@ type ReactionTargetRef = {
 type KeybaseRawApprovalTarget = {
   to: string;
 };
+
+const DEFAULT_KEYBASE_APPROVAL_PROMPT_LIMIT = 3_800;
+const MIN_KEYBASE_APPROVAL_PROMPT_LIMIT = 512;
+const KEYBASE_APPROVAL_TRUNCATION_NOTICE =
+  "\n\n[Approval details are too long for one Keybase message. React here; full details follow.]";
 
 function normalizeKeybaseApprovalTarget(raw: string): string | null {
   return normalizeKeybaseTarget(raw) ?? null;
@@ -162,6 +168,29 @@ function normalizeReactionTargetRef(params: ReactionTargetRef): ReactionTargetRe
   return { targetKey, messageId };
 }
 
+export function buildKeybaseApprovalPendingMessages(params: { limit?: number; text: string }): {
+  detailText?: string;
+  promptText: string;
+} {
+  const limit = Math.max(
+    MIN_KEYBASE_APPROVAL_PROMPT_LIMIT,
+    Math.min(
+      params.limit ?? DEFAULT_KEYBASE_APPROVAL_PROMPT_LIMIT,
+      DEFAULT_KEYBASE_APPROVAL_PROMPT_LIMIT,
+    ),
+  );
+  if (params.text.length <= limit) {
+    return { promptText: params.text };
+  }
+
+  const headLimit = Math.max(1, limit - KEYBASE_APPROVAL_TRUNCATION_NOTICE.length);
+  const promptText = `${params.text.slice(0, headLimit).trimEnd()}${KEYBASE_APPROVAL_TRUNCATION_NOTICE}`;
+  return {
+    promptText,
+    detailText: params.text,
+  };
+}
+
 export const keybaseApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapter<
   PendingApprovalContent,
   PreparedKeybaseTarget,
@@ -209,10 +238,14 @@ export const keybaseApprovalNativeRuntime = createChannelApprovalNativeRuntimeAd
     },
     deliverPending: async ({ cfg, accountId, preparedTarget, pendingPayload }) => {
       const account = resolveKeybaseAccount({ cfg: cfg as CoreConfig, accountId });
+      const messages = buildKeybaseApprovalPendingMessages({
+        limit: account.textChunkLimit,
+        text: pendingPayload.text,
+      });
       const result = await sendKeybaseText({
         account,
         to: preparedTarget.to,
-        text: pendingPayload.text,
+        text: messages.promptText,
       });
       await Promise.allSettled(
         listKeybaseApprovalReactionBindings(pendingPayload.allowedDecisions).map(
@@ -226,6 +259,14 @@ export const keybaseApprovalNativeRuntime = createChannelApprovalNativeRuntimeAd
           },
         ),
       );
+      if (messages.detailText) {
+        await sendKeybaseTextChunks({
+          account,
+          to: preparedTarget.to,
+          text: messages.detailText,
+          replyToId: result.messageId,
+        }).catch(() => undefined);
+      }
       return {
         targetKey: preparedTarget.targetKey,
         messageId: result.messageId,
