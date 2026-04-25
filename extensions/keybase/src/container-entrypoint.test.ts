@@ -1,7 +1,10 @@
+import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   applyKeybaseContainerConfig,
@@ -9,6 +12,8 @@ import {
   resolveKeybaseContainerConfig,
   runKeybaseContainerEntrypoint,
 } from "./container-entrypoint.js";
+
+const execFileAsync = promisify(execFile);
 
 type MockChildProcess = {
   emit: (eventName: string | symbol, ...args: unknown[]) => boolean;
@@ -19,6 +24,24 @@ type MockChildProcess = {
   pid: number;
   signalCode: string | null;
 };
+
+function createMockChildProcess() {
+  const child = new EventEmitter() as unknown as MockChildProcess & {
+    stdin: PassThrough;
+    stderr: PassThrough;
+  };
+  child.exitCode = null;
+  child.killed = false;
+  child.pid = process.pid;
+  child.signalCode = null;
+  child.stdin = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => {
+    child.killed = true;
+    return true;
+  };
+  return child;
+}
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -71,6 +94,22 @@ describe("resolveKeybaseContainerConfig", () => {
       socketFile: "/srv/runtime/keybased.sock",
       tmpDir: "/srv/openclaw-tmp",
       username: "claw_ll",
+    });
+  });
+});
+
+describe("generated Docker entrypoint", () => {
+  it("matches the TypeScript source", async () => {
+    await expect(
+      execFileAsync(
+        process.execPath,
+        ["scripts/generate-keybase-container-entrypoint.mjs", "--check"],
+        {
+          cwd: process.cwd(),
+        },
+      ),
+    ).resolves.toMatchObject({
+      stderr: "",
     });
   });
 });
@@ -132,17 +171,13 @@ describe("applyKeybaseContainerConfig", () => {
         auth: {
           token: "secret",
         },
-        controlUi: {
-          allowInsecureAuth: true,
-        },
-        bind: "lan",
       },
     });
   });
 });
 
 describe("prepareKeybaseContainer", () => {
-  it("writes config and runs oneshot from a paper key file", async () => {
+  it("writes config and starts the Keybase service from a paper key file", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "keybase-container-entrypoint-"));
     cleanups.push(async () => {
       await rm(rootDir, { recursive: true, force: true });
@@ -150,8 +185,27 @@ describe("prepareKeybaseContainer", () => {
 
     const configPath = path.join(rootDir, "openclaw.json");
     const paperKeyPath = path.join(rootDir, "paper-key.txt");
-    const oneshotMock = vi.fn(async () => undefined);
     await writeFile(paperKeyPath, "test paper key\n", "utf8");
+    const serviceChild = createMockChildProcess();
+    const stdinChunks: string[] = [];
+    serviceChild.stdin.setEncoding("utf8");
+    serviceChild.stdin.on("data", (chunk: string) => {
+      stdinChunks.push(chunk);
+    });
+    const statMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("socket missing"))
+      .mockResolvedValue({});
+    const spawnMock = vi.fn((_: string, args: string[]) => {
+      if (args.includes("service")) {
+        return serviceChild;
+      }
+      const commandChild = createMockChildProcess();
+      setImmediate(() => {
+        commandChild.emit("exit", 0, null);
+      });
+      return commandChild;
+    });
 
     await prepareKeybaseContainer(
       {
@@ -167,21 +221,49 @@ describe("prepareKeybaseContainer", () => {
         username: "claw_ll",
       },
       {
-        oneshot: oneshotMock,
+        readdir: vi.fn(async () => []),
+        sleep: vi.fn(async () => undefined),
+        spawn: spawnMock as never,
+        stat: statMock,
       },
     );
 
-    expect(oneshotMock).toHaveBeenCalledWith(
-      {
-        paperKey: "test paper key",
-        username: "claw_ll",
-      },
-      {
-        binary: "keybase",
-        homeDir: path.join(rootDir, "keybase-home"),
-        pidFile: path.join(rootDir, "runtime", "keybased.pid"),
-        socketFile: path.join(rootDir, "runtime", "keybased.sock"),
-      },
+    expect(stdinChunks.join("")).toBe("test paper key\n");
+    expect(spawnMock).toHaveBeenCalledWith(
+      "keybase",
+      [
+        "--home",
+        path.join(rootDir, "keybase-home"),
+        "--socket-file",
+        path.join(rootDir, "runtime", "keybased.sock"),
+        "--pid-file",
+        path.join(rootDir, "runtime", "keybased.pid"),
+        "service",
+        "--oneshot-username",
+        "claw_ll",
+      ],
+      expect.objectContaining({
+        env: expect.objectContaining({ KEYBASE_SERVICE: "1" }),
+        stdio: ["pipe", "ignore", "pipe"],
+      }),
+    );
+    expect(spawnMock).toHaveBeenCalledWith(
+      "keybase",
+      [
+        "--home",
+        path.join(rootDir, "keybase-home"),
+        "--socket-file",
+        path.join(rootDir, "runtime", "keybased.sock"),
+        "--pid-file",
+        path.join(rootDir, "runtime", "keybased.pid"),
+        "chat",
+        "notification-settings",
+        "-disable-typing=true",
+      ],
+      expect.objectContaining({
+        env: expect.objectContaining({ KEYBASE_SERVICE: "1" }),
+        stdio: ["ignore", "ignore", "pipe"],
+      }),
     );
 
     const written = JSON.parse(await readFile(configPath, "utf8")) as Record<string, unknown>;
@@ -199,13 +281,13 @@ describe("prepareKeybaseContainer", () => {
     });
   });
 
-  it("skips oneshot when credentials are absent", async () => {
+  it("skips service bootstrap when credentials are absent", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "keybase-container-entrypoint-"));
     cleanups.push(async () => {
       await rm(rootDir, { recursive: true, force: true });
     });
 
-    const oneshotMock = vi.fn(async () => undefined);
+    const spawnMock = vi.fn();
 
     await prepareKeybaseContainer(
       {
@@ -219,11 +301,11 @@ describe("prepareKeybaseContainer", () => {
         tmpDir: path.join(rootDir, "openclaw-tmp"),
       },
       {
-        oneshot: oneshotMock,
+        spawn: spawnMock as never,
       },
     );
 
-    expect(oneshotMock).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 });
 

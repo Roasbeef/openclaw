@@ -1,8 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { keybaseOneshot } from "./client.js";
 
 const DEFAULT_KEYBASE_BINARY = "keybase";
 const DEFAULT_KEYBASE_HOME = "/home/node";
@@ -12,16 +11,24 @@ const DEFAULT_CONFIG_PATH = "/home/node/.openclaw/openclaw.json";
 type ReadFileLike = typeof readFile;
 type WriteFileLike = typeof writeFile;
 type MkdirLike = typeof mkdir;
+type ReaddirLike = typeof readdir;
+type RmLike = typeof rm;
+type StatLike = typeof stat;
 
-type OneshotLike = typeof keybaseOneshot;
+type KillProcessLike = (pid: number, signal?: NodeJS.Signals | 0) => void;
+type SleepLike = (ms: number) => Promise<void>;
 
 type SpawnLike = typeof spawn;
 
 type RuntimeDeps = {
+  killProcess: KillProcessLike;
   mkdir: MkdirLike;
-  oneshot: OneshotLike;
+  readdir: ReaddirLike;
   readFile: ReadFileLike;
+  rm: RmLike;
+  sleep: SleepLike;
   spawn: SpawnLike;
+  stat: StatLike;
   writeFile: WriteFileLike;
 };
 
@@ -42,10 +49,18 @@ export interface ResolvedKeybaseContainerConfig {
 }
 
 const defaultRuntimeDeps: RuntimeDeps = {
+  killProcess: (pid, signal) => {
+    process.kill(pid, signal);
+  },
   mkdir,
-  oneshot: keybaseOneshot,
+  readdir,
   readFile,
+  rm,
+  sleep: async (ms) => {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  },
   spawn,
+  stat,
   writeFile,
 };
 
@@ -137,25 +152,19 @@ export function applyKeybaseContainerConfig(
   channels.keybase = channel;
   next.channels = channels;
 
-  const gateway = isRecord(next.gateway) ? { ...next.gateway } : {};
-  if (gateway.bind === undefined) {
-    gateway.bind = "lan";
+  if (isRecord(next.gateway)) {
+    const gateway = { ...next.gateway };
+    const auth = isRecord(gateway.auth) ? { ...gateway.auth } : undefined;
+    if (auth && "allowInsecureAuth" in auth) {
+      delete auth.allowInsecureAuth;
+    }
+    if (auth && Object.keys(auth).length > 0) {
+      gateway.auth = auth;
+    } else if ("auth" in gateway) {
+      delete gateway.auth;
+    }
+    next.gateway = gateway;
   }
-  const auth = isRecord(gateway.auth) ? { ...gateway.auth } : undefined;
-  if (auth && "allowInsecureAuth" in auth) {
-    delete auth.allowInsecureAuth;
-  }
-  if (auth && Object.keys(auth).length > 0) {
-    gateway.auth = auth;
-  } else if ("auth" in gateway) {
-    delete gateway.auth;
-  }
-  const controlUi = isRecord(gateway.controlUi) ? { ...gateway.controlUi } : {};
-  if (controlUi.allowInsecureAuth === undefined) {
-    controlUi.allowInsecureAuth = true;
-  }
-  gateway.controlUi = controlUi;
-  next.gateway = gateway;
 
   return next;
 }
@@ -192,6 +201,304 @@ async function resolvePaperKey(
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function buildKeybaseBaseArgs(resolved: ResolvedKeybaseContainerConfig): string[] {
+  const args: string[] = [];
+  const addPathFlag = (flag: string, value: string | undefined) => {
+    const normalized = normalizeOptionalString(value);
+    if (normalized) {
+      args.push(flag, normalized);
+    }
+  };
+  addPathFlag("--home", resolved.homeDir);
+  addPathFlag("--socket-file", resolved.socketFile);
+  addPathFlag("--pid-file", resolved.pidFile);
+  return args;
+}
+
+function buildKeybaseCommandEnv(
+  resolved: Pick<ResolvedKeybaseContainerConfig, "tmpDir">,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    KEYBASE_SERVICE: normalizeOptionalString(env.KEYBASE_SERVICE) ?? "1",
+    TMPDIR: normalizeOptionalString(env.TMPDIR) ?? resolved.tmpDir,
+  };
+}
+
+async function waitForKeybaseSocket(
+  resolved: ResolvedKeybaseContainerConfig,
+  getEarlyExitError: () => Error | undefined,
+  deps: Pick<RuntimeDeps, "sleep" | "stat">,
+): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    const earlyExitError = getEarlyExitError();
+    if (earlyExitError) {
+      throw earlyExitError;
+    }
+    try {
+      await deps.stat(resolved.socketFile);
+      return;
+    } catch (error) {
+      lastError = error;
+      await deps.sleep(250);
+    }
+  }
+  throw new Error(
+    `Keybase service socket did not appear at ${resolved.socketFile}: ${String(lastError)}`,
+  );
+}
+
+async function runKeybaseCommand(
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  deps: Pick<RuntimeDeps, "spawn">,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = deps.spawn(command, [...args], {
+      env,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string | Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (signal) {
+        reject(new Error(`Command ${command} exited with signal ${signal}: ${stderr}`));
+        return;
+      }
+      if (typeof code === "number" && code !== 0) {
+        reject(new Error(`Command ${command} exited with status ${code}: ${stderr}`));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function isKeybaseServerAlreadyRunningError(stderr: string): boolean {
+  return (
+    stderr.includes("server already running") ||
+    stderr.includes("error locking") ||
+    stderr.includes("resource temporarily unavailable")
+  );
+}
+
+function isKeybaseLoginRequiredError(error: unknown): boolean {
+  return String(error).includes("Login required");
+}
+
+async function findLingeringKeybasePids(
+  deps: Pick<RuntimeDeps, "readFile" | "readdir">,
+): Promise<number[]> {
+  let entries: string[];
+  try {
+    entries = await deps.readdir("/proc");
+  } catch {
+    return [];
+  }
+
+  const pids: number[] = [];
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) {
+      continue;
+    }
+    const pid = Number.parseInt(entry, 10);
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+      continue;
+    }
+    let cmdline: string;
+    try {
+      cmdline = await deps.readFile(path.join("/proc", entry, "cmdline"), "utf8");
+    } catch {
+      continue;
+    }
+    const parts = cmdline.split("\0").filter(Boolean);
+    if (parts.some((part) => path.basename(part) === "keybase")) {
+      pids.push(pid);
+    }
+  }
+  return pids;
+}
+
+async function stopLingeringKeybaseProcesses(
+  deps: Pick<RuntimeDeps, "killProcess" | "readFile" | "readdir" | "sleep">,
+): Promise<void> {
+  const pids = await findLingeringKeybasePids(deps);
+  for (const pid of pids) {
+    try {
+      deps.killProcess(pid, "SIGTERM");
+    } catch {
+      // The process may already be gone.
+    }
+  }
+  if (pids.length > 0) {
+    await deps.sleep(1_000);
+  }
+  for (const pid of pids) {
+    try {
+      deps.killProcess(pid, 0);
+      deps.killProcess(pid, "SIGKILL");
+    } catch {
+      // Process exited after SIGTERM.
+    }
+  }
+}
+
+async function stopExistingKeybaseService(
+  resolved: ResolvedKeybaseContainerConfig,
+  deps: Pick<RuntimeDeps, "killProcess" | "readFile" | "readdir" | "rm" | "sleep">,
+): Promise<void> {
+  try {
+    const rawPid = await deps.readFile(resolved.pidFile, "utf8");
+    const pid = Number.parseInt(rawPid.trim(), 10);
+    if (Number.isInteger(pid) && pid > 0) {
+      try {
+        deps.killProcess(pid, "SIGTERM");
+        await deps.sleep(1_000);
+      } catch {
+        // The process may already be gone; stale pid files are cleaned below.
+      }
+      try {
+        deps.killProcess(pid, 0);
+        deps.killProcess(pid, "SIGKILL");
+      } catch {
+        // Process exited after SIGTERM or the pid file was stale.
+      }
+    }
+  } catch {
+    // No pid file is fine; remove any stale socket/pid paths below.
+  }
+  await stopLingeringKeybaseProcesses(deps);
+  await Promise.all([
+    deps.rm(resolved.socketFile, { force: true }),
+    deps.rm(resolved.pidFile, { force: true }),
+  ]);
+}
+
+async function startKeybaseService(
+  resolved: ResolvedKeybaseContainerConfig,
+  paperKey: string,
+  deps: Pick<
+    RuntimeDeps,
+    "killProcess" | "readFile" | "readdir" | "rm" | "sleep" | "spawn" | "stat"
+  >,
+  attempt = 0,
+): Promise<void> {
+  const username = normalizeOptionalString(resolved.username);
+  if (!username) {
+    throw new Error("KEYBASE_USERNAME is required to start the Keybase service.");
+  }
+  const env = buildKeybaseCommandEnv(resolved);
+  const args = [...buildKeybaseBaseArgs(resolved), "service", "--oneshot-username", username];
+  const child = deps.spawn(resolved.binary, args, {
+    env,
+    stdio: ["pipe", "ignore", "pipe"],
+  });
+
+  if (!child.stdin) {
+    throw new Error("Keybase service child process did not expose stdin");
+  }
+
+  let stderr = "";
+  let ready = false;
+  let earlyExitError: Error | undefined;
+  let earlyExitAlreadyRunning = false;
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string | Buffer) => {
+    stderr += chunk.toString();
+  });
+  child.once("exit", (code, signal) => {
+    if (ready) {
+      return;
+    }
+    if (isKeybaseServerAlreadyRunningError(stderr)) {
+      earlyExitAlreadyRunning = true;
+      return;
+    }
+    const reason = signal ? `signal ${signal}` : `status ${code}`;
+    earlyExitError = new Error(`Keybase service exited before readiness (${reason}): ${stderr}`);
+  });
+  child.stdin.end(`${paperKey.trim()}\n`);
+
+  try {
+    await waitForKeybaseSocket(resolved, () => earlyExitError, deps);
+  } catch (error) {
+    if (attempt < 4) {
+      if (!child.killed) {
+        child.kill();
+      }
+      await stopExistingKeybaseService(resolved, deps);
+      await startKeybaseService(resolved, paperKey, deps, attempt + 1);
+      return;
+    }
+    throw error;
+  }
+
+  const deadline = Date.now() + 30_000;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    if (earlyExitError) {
+      throw earlyExitError;
+    }
+    try {
+      await runKeybaseCommand(
+        resolved.binary,
+        [
+          ...buildKeybaseBaseArgs(resolved),
+          "chat",
+          "notification-settings",
+          "-disable-typing=true",
+        ],
+        env,
+        deps,
+      );
+      ready = true;
+      return;
+    } catch (error) {
+      lastError = error;
+      if (earlyExitError) {
+        throw earlyExitError;
+      }
+      await deps.sleep(250);
+    }
+  }
+
+  if (!child.killed) {
+    child.kill();
+  }
+  if (attempt < 4 && (earlyExitAlreadyRunning || isKeybaseLoginRequiredError(lastError))) {
+    await stopExistingKeybaseService(resolved, deps);
+    await startKeybaseService(resolved, paperKey, deps, attempt + 1);
+    return;
+  }
+  throw new Error(`Keybase service did not become ready: ${String(lastError)}`);
+}
+
+async function isExistingKeybaseServiceReady(
+  resolved: ResolvedKeybaseContainerConfig,
+  deps: Pick<RuntimeDeps, "spawn" | "stat">,
+): Promise<boolean> {
+  try {
+    await deps.stat(resolved.socketFile);
+    await runKeybaseCommand(
+      resolved.binary,
+      [...buildKeybaseBaseArgs(resolved), "whoami"],
+      buildKeybaseCommandEnv(resolved),
+      deps,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function prepareKeybaseContainer(
   resolved: ResolvedKeybaseContainerConfig,
   deps: Partial<RuntimeDeps> = {},
@@ -219,18 +526,12 @@ export async function prepareKeybaseContainer(
     return;
   }
 
-  await runtimeDeps.oneshot(
-    {
-      paperKey,
-      username: resolved.username,
-    },
-    {
-      binary: resolved.binary,
-      homeDir: resolved.homeDir,
-      pidFile: resolved.pidFile,
-      socketFile: resolved.socketFile,
-    },
-  );
+  if (await isExistingKeybaseServiceReady(resolved, runtimeDeps)) {
+    return;
+  }
+
+  await stopExistingKeybaseService(resolved, runtimeDeps);
+  await startKeybaseService(resolved, paperKey, runtimeDeps);
 }
 
 function buildSpawnEnv(
