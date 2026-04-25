@@ -75,13 +75,19 @@ Useful fields:
 
 ## Group routing
 
-Keybase team chats use the standard OpenClaw group model:
+Keybase team chats use the standard OpenClaw group model. Multi-party Keybase
+implicit-team DMs are also treated as group chats when the channel name contains
+more than two distinct usernames, so an allowed DM sender cannot invite extra
+participants and bypass group policy.
 
 - `groupPolicy: "allowlist"` blocks team chats until `groups` is configured.
 - `requireMention` defaults to `true`.
 - `groups["*"]` works as a wildcard default.
 - Per-group `allowFrom` restricts which senders inside an allowed team chat can trigger replies.
 - Per-group `systemPrompt` and `skills` apply to that route only.
+- Multi-party implicit-team DMs can be allowlisted with
+  `impteam:alice,bob,openclaw`; names are normalized case-insensitively and
+  sorted. Two-party DMs remain direct messages and use `dmPolicy`.
 
 Example:
 
@@ -194,6 +200,10 @@ Reaction shortcuts:
 The text `/approve` path remains available as a fallback. If no Keybase
 approvers are configured, same-chat text approval behavior stays governed by the
 normal channel command authorization.
+
+Native approval prompts send a bounded first message so reaction shortcuts can
+attach reliably. If the approval body is larger than Keybase's message cap,
+OpenClaw posts the full details as chunked follow-up messages.
 
 ## Subagents and async delivery
 
@@ -331,9 +341,17 @@ Notes:
   provider auth.
 - The gateway container starts with
   `/app/extensions/keybase/docker/keybase-entrypoint.sh`, which sources optional
-  secret env files and delegates to `container-entrypoint.mjs` to sync the local
-  Keybase baseline into `state/home/.openclaw/openclaw.json`, run the verified
-  service bootstrap with the mounted paper key, and then start the gateway.
+  secret env files and delegates to the generated `container-entrypoint.mjs` to
+  sync the local Keybase baseline into `state/home/.openclaw/openclaw.json`, run
+  the verified service bootstrap with the mounted paper key, and then start the
+  gateway.
+- The generated entrypoint comes from
+  `extensions/keybase/src/container-entrypoint.ts`; run
+  `pnpm keybase:entrypoint:gen` after source changes and
+  `pnpm keybase:entrypoint:check` to verify it is current.
+- The entrypoint does not implicitly set `gateway.bind` or
+  `gateway.controlUi.allowInsecureAuth`; the local smoke scaffold opts into
+  LAN binding explicitly for interactive testing.
 - The smoke harness persists the Keybase home under `state/home`, but keeps the
   service socket and pid file under container-local `/tmp/openclaw-keybase` to
   avoid Docker Desktop shared-volume Unix socket issues.
@@ -381,10 +399,10 @@ The QA lane reuses the same two-container scaffold and writes
 covers team-channel canary replies, tagged help commands, native command
 advertisement discovery, chunked command delivery, DM canary replies, DM pairing
 challenges, `/subagents list`, `/subagents spawn` with same-chat completion,
-mention gating, group allowlist block, restart resume, and ack reaction
+mention gating, group allowlist block, listener-child restart, gateway restart resume, and ack reaction
 observation. The runner installs the requested
 `team#general` test route in the local smoke config before it starts assertions. Use repeated
 `--scenario <id>` flags to run a subset: `canary`, `help-command`,
 `command-advertisements`, `chunked-commands`, `dm-canary`, `dm-pairing`,
 `subagents-list`, `subagents-spawn`, `mention-gating`, `allowlist-block`, or
-`restart-resume`.
+`listener-restart`, or `restart-resume`.

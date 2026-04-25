@@ -48,6 +48,7 @@ export type KeybaseDockerBlackboxScenarioId =
   | "dm-canary"
   | "dm-pairing"
   | "help-command"
+  | "listener-restart"
   | "mention-gating"
   | "restart-resume"
   | "subagents-list"
@@ -94,6 +95,7 @@ const DEFAULT_BLACKBOX_SCENARIOS: readonly KeybaseDockerBlackboxScenarioId[] = [
   "subagents-spawn",
   "mention-gating",
   "allowlist-block",
+  "listener-restart",
   "restart-resume",
 ];
 const GATEWAY_SERVICE = "openclaw-keybase-gateway";
@@ -288,7 +290,7 @@ Generated scaffold for a local Keybase-backed OpenClaw smoke run.
    - \`pnpm keybase:smoke:blackbox --output-dir . --team "$KEYBASE_TEST_TEAM" --bot "$KEYBASE_TEST_BOT_USERNAME"\`
 9. Full QA runner:
    - \`pnpm openclaw qa keybase --output-dir . --team "$KEYBASE_TEST_TEAM" --bot "$KEYBASE_TEST_BOT_USERNAME"\`
-   - covers team-channel canary reply, tagged help command, native command advertisements, chunked command delivery, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation
+   - covers team-channel canary reply, tagged help command, native command advertisements, chunked command delivery, DM canary reply, DM pairing challenge, mention gating, group allowlist block, listener-child restart, gateway restart resume, and ack reaction observation
 
 ## Notes
 
@@ -1811,6 +1813,26 @@ async function restartKeybaseGateway(context: KeybaseBlackboxContext): Promise<v
   });
 }
 
+async function stopKeybaseApiListenChild(context: KeybaseBlackboxContext): Promise<void> {
+  await runComposeExec({
+    composeFile: context.composeFile,
+    cwd: context.outputDir,
+    envFile: context.envFile,
+    runCommand: context.runCommand,
+    service: GATEWAY_SERVICE,
+    command: [
+      "sh",
+      "-lc",
+      [
+        "pids=\"$(ps ax -o pid= -o args= | awk '/[k]eybase .*chat api-listen/ {print $1}')\"",
+        'test -n "$pids"',
+        "kill $pids",
+      ].join("; "),
+    ],
+  });
+  await sleep(3_000);
+}
+
 function buildDirectConversation(botUsername: string): KeybaseBlackboxConversation {
   return {
     channel: {
@@ -2418,6 +2440,15 @@ export async function runKeybaseDockerBlackboxSuite(
             context,
             marker,
             quietMs,
+          });
+          break;
+        case "listener-restart":
+          await stopKeybaseApiListenChild(context);
+          details = await runMentionReplyProbe({
+            context,
+            marker,
+            prefix: "keybase listener restart ok",
+            timeoutMs,
           });
           break;
         case "restart-resume":

@@ -130,7 +130,7 @@ runs the same lanes before release approval.
   - Runs the Keybase live QA lane against local Docker containers for a Keybase bot identity and a separate sender identity.
   - Requires the Keybase smoke scaffold under `.artifacts/keybase-docker`, filled `.env`, bot paper key, sender paper key, and a real test team such as `lbottest`.
   - Installs the requested `team#general` route in the local smoke config before running assertions.
-  - Covers team-channel canary reply, native command advertisement discovery, chunked command delivery, DM canary reply, DM pairing challenge, mention gating, group allowlist block, restart resume, and ack reaction observation.
+  - Covers team-channel canary reply, native command advertisement discovery, chunked command delivery, DM canary reply, DM pairing challenge, mention gating, group allowlist block, listener-child restart, gateway restart resume, and ack reaction observation.
   - Writes a Keybase QA report and summary under the smoke output directory.
 - `pnpm openclaw qa telegram`
   - Runs the Telegram live QA lane against a real private group using the driver and SUT bot tokens from env.
