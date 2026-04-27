@@ -18,6 +18,9 @@ export type McpRequestContext = {
   messageProvider: string | undefined;
   accountId: string | undefined;
   senderIsOwner: boolean | undefined;
+  agentTo: string | undefined;
+  agentThreadId: string | undefined;
+  agentGroupId: string | undefined;
 };
 
 function resolveScopedSessionKey(cfg: OpenClawConfig, rawSessionKey: string | undefined): string {
@@ -135,5 +138,8 @@ export function resolveMcpRequestContext(
     accountId: normalizeOptionalString(getHeader(req, "x-openclaw-account-id")),
     senderIsOwner:
       senderIsOwnerRaw === "true" ? true : senderIsOwnerRaw === "false" ? false : undefined,
+    agentTo: normalizeOptionalString(getHeader(req, "x-openclaw-message-to")),
+    agentThreadId: normalizeOptionalString(getHeader(req, "x-openclaw-thread-id")),
+    agentGroupId: normalizeOptionalString(getHeader(req, "x-openclaw-message-group-id")),
   };
 }

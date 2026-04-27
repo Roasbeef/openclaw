@@ -30,6 +30,7 @@ export function resolveGatewayScopedTools(params: {
   accountId?: string;
   agentTo?: string;
   agentThreadId?: string;
+  agentGroupId?: string;
   allowGatewaySubagentBinding?: boolean;
   allowMediaInvokeCommands?: boolean;
   surface?: GatewayScopedToolSurface;
@@ -75,6 +76,7 @@ export function resolveGatewayScopedTools(params: {
     agentAccountId: params.accountId,
     agentTo: params.agentTo,
     agentThreadId: params.agentThreadId,
+    agentGroupId: params.agentGroupId,
     allowGatewaySubagentBinding: params.allowGatewaySubagentBinding,
     allowMediaInvokeCommands: params.allowMediaInvokeCommands,
     disablePluginTools: params.disablePluginTools,
