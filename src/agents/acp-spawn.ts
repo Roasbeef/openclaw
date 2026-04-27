@@ -22,6 +22,7 @@ import {
   formatThreadBindingSpawnDisabledError,
   resolveThreadBindingIdleTimeoutMsForChannel,
   resolveThreadBindingMaxAgeMsForChannel,
+  resolveThreadBindingPlacementForCurrentContext,
   resolveThreadBindingSpawnPolicy,
 } from "../channels/thread-bindings-policy.js";
 import { parseDurationMs } from "../cli/parse-duration.js";
@@ -210,21 +211,6 @@ type AcpSpawnBootstrapDeliveryPlan = {
   to?: string;
   threadId?: string;
 };
-
-function resolvePlacementWithoutChannelPlugin(params: {
-  channel: string;
-  capabilities: { placements: Array<"current" | "child"> };
-}): "current" | "child" {
-  switch (params.channel) {
-    case "discord":
-    case "matrix":
-      return params.capabilities.placements.includes("child") ? "child" : "current";
-    case "line":
-    case "telegram":
-      return "current";
-  }
-  return params.capabilities.placements.includes("child") ? "child" : "current";
-}
 
 function normalizeLineConversationIdFallback(value: string | undefined): string | undefined {
   const trimmed = normalizeOptionalString(value) ?? "";
@@ -644,14 +630,21 @@ function prepareAcpThreadBinding(params: {
       error: `Thread bindings are unavailable for ${policy.channel}.`,
     };
   }
-  const pluginPlacement = getChannelPlugin(policy.channel)?.conversationBindings
-    ?.defaultTopLevelPlacement;
-  const placementToUse =
-    pluginPlacement ??
-    resolvePlacementWithoutChannelPlugin({
-      channel: policy.channel,
-      capabilities,
-    });
+  // When the inbound is already inside a thread (threadId set), bind to that
+  // thread (placement="current") instead of trying to nest a new child thread
+  // under it (which Discord can't do anyway). Mirrors what /acp spawn does via
+  // resolveThreadBindingPlacementForCurrentContext; the prior
+  // `getChannelPlugin(...).conversationBindings.defaultTopLevelPlacement`
+  // lookup ignored threadId and always returned the channel's
+  // defaultTopLevelPlacement, which is "child" for Discord — producing
+  // thread_binding_invalid when the caller was already in a thread.
+  const placementToUse = resolveThreadBindingPlacementForCurrentContext({
+    channel: policy.channel,
+    threadId:
+      typeof params.threadId === "number"
+        ? String(params.threadId)
+        : (normalizeOptionalString(params.threadId) ?? undefined),
+  });
   if (!capabilities.bindSupported || !capabilities.placements.includes(placementToUse)) {
     return {
       ok: false,
