@@ -658,7 +658,38 @@ describe("spawnAcpDirect", () => {
     sessionBindingServiceTesting.resetSessionBindingAdaptersForTests();
   });
 
-  it("spawns ACP session, binds a new thread, and dispatches initial task", async () => {
+  it("binds an ACP session to the requester's existing Discord thread (placement=current)", async () => {
+    // When the requester is already in a thread (agentThreadId set), placement
+    // should resolve to "current" and the binding should reuse that thread —
+    // not create a new child thread of the parent channel. Mirrors what
+    // /acp spawn does via resolveThreadBindingPlacementForCurrentContext.
+    hoisted.sessionBindingBindMock.mockReset().mockImplementationOnce(
+      async (input: {
+        targetSessionKey: string;
+        conversation: {
+          accountId: string;
+          conversationId: string;
+          parentConversationId?: string;
+        };
+        metadata?: Record<string, unknown>;
+      }) =>
+        createSessionBinding({
+          targetSessionKey: input.targetSessionKey,
+          conversation: {
+            channel: "discord",
+            accountId: input.conversation.accountId,
+            conversationId: input.conversation.conversationId,
+            parentConversationId: input.conversation.parentConversationId,
+          },
+          metadata: {
+            boundBy:
+              typeof input.metadata?.boundBy === "string" ? input.metadata.boundBy : "system",
+            agentId: "codex",
+            webhookId: "wh-1",
+          },
+        }),
+    );
+
     const result = await spawnAcpDirect(
       {
         task: "Investigate flaky tests",
@@ -689,7 +720,11 @@ describe("spawnAcpDirect", () => {
     expect(hoisted.sessionBindingBindMock).toHaveBeenCalledWith(
       expect.objectContaining({
         targetKind: "session",
-        placement: "child",
+        placement: "current",
+        conversation: expect.objectContaining({
+          channel: "discord",
+          conversationId: "requester-thread",
+        }),
       }),
     );
     expectResolvedIntroTextInBindMetadata();
@@ -698,8 +733,7 @@ describe("spawnAcpDirect", () => {
       .map((call: unknown[]) => call[0] as { method?: string; params?: Record<string, unknown> })
       .find((request) => request.method === "agent");
     expect(agentCall?.params?.sessionKey).toMatch(/^agent:codex:acp:/);
-    expect(agentCall?.params?.to).toBe("channel:child-thread");
-    expect(agentCall?.params?.threadId).toBe("child-thread");
+    expect(agentCall?.params?.threadId).toBe("requester-thread");
     expect(agentCall?.params?.deliver).toBe(true);
     expect(hoisted.initializeSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -708,6 +742,41 @@ describe("spawnAcpDirect", () => {
         mode: "persistent",
       }),
     );
+  });
+
+  it("creates a new child thread when the requester is at the channel top-level (placement=child)", async () => {
+    // No agentThreadId — caller is at the parent channel, so the channel's
+    // defaultTopLevelPlacement ("child" for Discord) applies and a new thread
+    // is created under the parent channel.
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        mode: "session",
+        thread: true,
+      },
+      {
+        agentSessionKey: "agent:main:main",
+        agentChannel: "discord",
+        agentAccountId: "default",
+        agentTo: "channel:parent-channel",
+      },
+    );
+
+    const accepted = expectAcceptedSpawn(result);
+    expect(accepted.childSessionKey).toMatch(/^agent:codex:acp:/);
+    expect(hoisted.sessionBindingBindMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetKind: "session",
+        placement: "child",
+      }),
+    );
+
+    const agentCall = hoisted.callGatewayMock.mock.calls
+      .map((call: unknown[]) => call[0] as { method?: string; params?: Record<string, unknown> })
+      .find((request) => request.method === "agent");
+    expect(agentCall?.params?.to).toBe("channel:child-thread");
+    expect(agentCall?.params?.threadId).toBe("child-thread");
     const transcriptCalls = hoisted.resolveSessionTranscriptFileMock.mock.calls.map(
       (call: unknown[]) => call[0] as { threadId?: string },
     );
@@ -1097,6 +1166,9 @@ describe("spawnAcpDirect", () => {
   });
 
   it("preserves Matrix parent room casing when binding from an existing thread", async () => {
+    // Requester is already in a thread (agentThreadId set), so placement
+    // resolves to "current" — bind to the existing thread, not create a new
+    // child of it. Casing of parentConversationId must still be preserved.
     enableMatrixAcpThreadBindings();
     hoisted.sessionBindingBindMock.mockImplementationOnce(
       async (input: {
@@ -1109,7 +1181,7 @@ describe("spawnAcpDirect", () => {
           conversation: {
             channel: "matrix",
             accountId: input.conversation.accountId,
-            conversationId: "child-thread",
+            conversationId: input.conversation.conversationId,
             parentConversationId: input.conversation.parentConversationId ?? "!Room:Example.org",
           },
           metadata: {
@@ -1141,7 +1213,7 @@ describe("spawnAcpDirect", () => {
     expect(result.status, JSON.stringify(result)).toBe("accepted");
     expect(hoisted.sessionBindingBindMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        placement: "child",
+        placement: "current",
         conversation: expect.objectContaining({
           channel: "matrix",
           accountId: "default",
@@ -1154,7 +1226,7 @@ describe("spawnAcpDirect", () => {
       deliver: true,
       channel: "matrix",
       to: "room:!Room:Example.org",
-      threadId: "child-thread",
+      threadId: "$thread-root",
     });
   });
 
