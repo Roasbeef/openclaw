@@ -33,12 +33,18 @@ export class McpLoopbackToolCache {
     messageProvider: string | undefined;
     accountId: string | undefined;
     senderIsOwner: boolean | undefined;
+    agentTo: string | undefined;
+    agentThreadId: string | undefined;
+    agentGroupId: string | undefined;
   }): CachedScopedTools {
     const cacheKey = [
       params.sessionKey,
       params.messageProvider ?? "",
       params.accountId ?? "",
       params.senderIsOwner === true ? "owner" : "non-owner",
+      params.agentTo ?? "",
+      params.agentThreadId ?? "",
+      params.agentGroupId ?? "",
     ].join("\u0000");
     const now = Date.now();
     const cached = this.#entries.get(cacheKey);
@@ -52,6 +58,9 @@ export class McpLoopbackToolCache {
       messageProvider: params.messageProvider,
       accountId: params.accountId,
       senderIsOwner: params.senderIsOwner,
+      agentTo: params.agentTo,
+      agentThreadId: params.agentThreadId,
+      agentGroupId: params.agentGroupId,
       surface: "loopback",
       excludeToolNames: NATIVE_TOOL_EXCLUDE,
     });

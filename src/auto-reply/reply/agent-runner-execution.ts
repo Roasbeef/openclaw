@@ -72,7 +72,7 @@ import {
   resolveModelFallbackOptions,
 } from "./agent-runner-utils.js";
 import { type BlockReplyPipeline } from "./block-reply-pipeline.js";
-import { resolveOriginMessageProvider } from "./origin-routing.js";
+import { resolveOriginMessageProvider, resolveOriginMessageTo } from "./origin-routing.js";
 import type { FollowupRun } from "./queue.js";
 import { createBlockReplyDeliveryHandler } from "./reply-delivery.js";
 import type { ReplyMediaContext } from "./reply-media-paths.js";
@@ -1005,6 +1005,12 @@ export async function runAgentTurnWithFallback(params: {
                   messageChannel: params.followupRun.originatingChannel ?? undefined,
                   messageProvider: hookMessageProvider,
                   agentAccountId: params.followupRun.run.agentAccountId,
+                  messageTo: resolveOriginMessageTo({
+                    originatingTo: params.sessionCtx.OriginatingTo,
+                    to: params.sessionCtx.To,
+                  }),
+                  messageThreadId: params.sessionCtx.MessageThreadId ?? undefined,
+                  messageGroupId: resolveGroupSessionKey(params.sessionCtx)?.id,
                   senderIsOwner: params.followupRun.run.senderIsOwner,
                   abortSignal: params.replyOperation?.abortSignal ?? params.opts?.abortSignal,
                   replyOperation: params.replyOperation,

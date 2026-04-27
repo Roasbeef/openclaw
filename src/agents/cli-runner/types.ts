@@ -41,6 +41,9 @@ export type RunCliAgentParams = {
   messageChannel?: string;
   messageProvider?: string;
   agentAccountId?: string;
+  messageTo?: string;
+  messageThreadId?: string | number;
+  messageGroupId?: string;
   senderIsOwner?: boolean;
   abortSignal?: AbortSignal;
   replyOperation?: ReplyOperation;
