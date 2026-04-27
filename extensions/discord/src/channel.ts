@@ -320,8 +320,24 @@ function resolveDiscordInboundConversation(params: {
   from?: string;
   to?: string;
   conversationId?: string;
+  threadId?: string | number;
   isGroup: boolean;
 }) {
+  const threadId = normalizeOptionalString(
+    typeof params.threadId === "number" ? String(params.threadId) : params.threadId,
+  );
+  if (threadId) {
+    const parentConversationId = resolveDiscordConversationIdFromTargets([
+      params.to,
+      params.conversationId,
+    ]);
+    return {
+      conversationId: threadId,
+      ...(parentConversationId && parentConversationId !== threadId
+        ? { parentConversationId }
+        : {}),
+    };
+  }
   const conversationId = resolveDiscordCurrentConversationIdentity({
     from: params.from,
     chatType: params.isGroup ? "group" : "direct",
@@ -394,8 +410,8 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount, DiscordProbe> 
       },
       messaging: {
         normalizeTarget: normalizeDiscordMessagingTarget,
-        resolveInboundConversation: ({ from, to, conversationId, isGroup }) =>
-          resolveDiscordInboundConversation({ from, to, conversationId, isGroup }),
+        resolveInboundConversation: ({ from, to, conversationId, threadId, isGroup }) =>
+          resolveDiscordInboundConversation({ from, to, conversationId, threadId, isGroup }),
         normalizeExplicitSessionKey: ({ sessionKey, ctx }) =>
           normalizeExplicitDiscordSessionKey(sessionKey, ctx),
         resolveSessionTarget: ({ id }) => normalizeDiscordMessagingTarget(`channel:${id}`),
