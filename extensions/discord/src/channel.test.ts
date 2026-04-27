@@ -479,3 +479,83 @@ describe("discordPlugin groups", () => {
     ).toEqual({ allow: ["message.channel"] });
   });
 });
+
+describe("discordPlugin.messaging.resolveInboundConversation", () => {
+  it("returns the thread id as conversationId with parent channel when threadId is provided", () => {
+    const resolveInboundConversation = discordPlugin.messaging?.resolveInboundConversation;
+    if (!resolveInboundConversation) {
+      throw new Error("Expected discordPlugin.messaging.resolveInboundConversation to be defined");
+    }
+
+    const ref = resolveInboundConversation({
+      from: "discord:user:111",
+      to: "channel:1495219283272274059",
+      conversationId: "channel:1495219283272274059",
+      threadId: "1497361719998283826",
+      isGroup: true,
+    });
+    expect(ref).toEqual({
+      conversationId: "1497361719998283826",
+      parentConversationId: "channel:1495219283272274059",
+    });
+  });
+
+  it("normalizes a numeric threadId and a bare-id `to` into channel-prefixed parent", () => {
+    const resolveInboundConversation = discordPlugin.messaging?.resolveInboundConversation;
+    if (!resolveInboundConversation) {
+      throw new Error("Expected discordPlugin.messaging.resolveInboundConversation to be defined");
+    }
+
+    const ref = resolveInboundConversation({
+      to: "1495219283272274059",
+      threadId: 1497361719998283826,
+      isGroup: true,
+    });
+    expect(ref).toEqual({
+      conversationId: "1497361719998283826",
+      parentConversationId: "channel:1495219283272274059",
+    });
+  });
+
+  it("omits parentConversationId when it would equal the threadId", () => {
+    const resolveInboundConversation = discordPlugin.messaging?.resolveInboundConversation;
+    if (!resolveInboundConversation) {
+      throw new Error("Expected discordPlugin.messaging.resolveInboundConversation to be defined");
+    }
+
+    const ref = resolveInboundConversation({
+      to: "channel:1497361719998283826",
+      conversationId: "channel:1497361719998283826",
+      threadId: "1497361719998283826",
+      isGroup: true,
+    });
+    expect(ref).toEqual({ conversationId: "1497361719998283826" });
+  });
+
+  it("falls back to current-conversation resolution when no threadId is provided", () => {
+    const resolveInboundConversation = discordPlugin.messaging?.resolveInboundConversation;
+    if (!resolveInboundConversation) {
+      throw new Error("Expected discordPlugin.messaging.resolveInboundConversation to be defined");
+    }
+
+    const ref = resolveInboundConversation({
+      to: "channel:1495219283272274059",
+      conversationId: "channel:1495219283272274059",
+      isGroup: true,
+    });
+    expect(ref?.conversationId).toBe("channel:1495219283272274059");
+    expect(ref).not.toHaveProperty("parentConversationId");
+  });
+
+  it("returns null when neither threadId nor a resolvable conversation is provided", () => {
+    const resolveInboundConversation = discordPlugin.messaging?.resolveInboundConversation;
+    if (!resolveInboundConversation) {
+      throw new Error("Expected discordPlugin.messaging.resolveInboundConversation to be defined");
+    }
+
+    const ref = resolveInboundConversation({
+      isGroup: false,
+    });
+    expect(ref).toBeNull();
+  });
+});
