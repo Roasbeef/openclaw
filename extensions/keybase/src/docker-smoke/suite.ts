@@ -16,6 +16,7 @@ import {
   runSubagentsSpawnProbe,
   sendKeybaseBlackboxMessage,
   stopKeybaseApiListenChild,
+  type KeybaseBlackboxTimings,
 } from "./blackbox-probes.js";
 import type { RunCommand } from "./scaffold.js";
 
@@ -88,6 +89,7 @@ export async function runKeybaseDockerBlackboxSmoke(
     message?: string;
     outputDir: string;
     team: string;
+    timings?: KeybaseBlackboxTimings;
     timeoutMs?: number;
   },
   deps: {
@@ -104,6 +106,7 @@ export async function runKeybaseDockerBlackboxSmoke(
     outputDir: params.outputDir,
     runCommand: deps.runCommand,
     team: params.team,
+    ...(params.timings ? { timings: params.timings } : {}),
   });
 
   const body =
@@ -189,6 +192,7 @@ export async function runKeybaseDockerBlackboxSuite(
     outputDir: string;
     scenarioIds?: readonly string[];
     team: string;
+    timings?: KeybaseBlackboxTimings;
     timeoutMs?: number;
   },
   deps: {
@@ -205,6 +209,7 @@ export async function runKeybaseDockerBlackboxSuite(
     outputDir: params.outputDir,
     runCommand: deps.runCommand,
     team: params.team,
+    ...(params.timings ? { timings: params.timings } : {}),
   });
   const scenarios: KeybaseDockerBlackboxScenarioResult[] = [];
 

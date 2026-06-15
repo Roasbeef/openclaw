@@ -6,7 +6,11 @@ const KEYBASE_IMPLICIT_TEAM_GROUP_PREFIX = "impteam:";
 export interface ParsedKeybaseTarget {
   conversationId?: string;
   normalized: string;
-  chatType: "direct" | "group";
+  // Opaque `conv:<id>` targets omit chatType because the ID alone cannot
+  // distinguish a DM thread from a team channel. Callers that need the
+  // distinction must derive it from the inbound message envelope or by
+  // asking the Keybase API.
+  chatType?: "direct" | "group";
   raw: string;
   teamName?: string;
   topicName?: string;
@@ -97,7 +101,6 @@ export function parseKeybaseTarget(raw: string): ParsedKeybaseTarget | null {
     return {
       raw,
       conversationId,
-      chatType: "direct",
       normalized: `conv:${conversationId}`,
     };
   }

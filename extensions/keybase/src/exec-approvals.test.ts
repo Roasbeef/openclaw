@@ -2,6 +2,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
 import { describe, expect, it } from "vitest";
 import {
   getKeybaseExecApprovalApprovers,
+  getKeybasePluginApprovalApprovers,
   isKeybaseExecApprovalApprover,
   isKeybaseExecApprovalAuthorizedSender,
   isKeybaseExecApprovalClientEnabled,
@@ -81,6 +82,28 @@ describe("keybase exec approvals", () => {
     expect(isKeybaseExecApprovalTargetRecipient({ cfg, senderId: "roasbeef" })).toBe(true);
     expect(isKeybaseExecApprovalTargetRecipient({ cfg, senderId: "other" })).toBe(false);
     expect(isKeybaseExecApprovalAuthorizedSender({ cfg, senderId: "roasbeef" })).toBe(true);
+  });
+
+  it("plugin approvals honor execApprovals.approvers and fall back to allowFrom", () => {
+    // Explicit approvers -> use them, ignore allowFrom.
+    const explicit = buildConfig(
+      { enabled: true, approvers: ["keybase:alice"] },
+      { allowFrom: ["roasbeef"] },
+    );
+    expect(getKeybasePluginApprovalApprovers({ cfg: explicit })).toEqual(["alice"]);
+    expect(getKeybaseExecApprovalApprovers({ cfg: explicit })).toEqual(["alice"]);
+
+    // No execApprovals.approvers -> fall back to allowFrom.
+    const fallback = buildConfig(
+      { enabled: true, approvers: [] },
+      { allowFrom: ["roasbeef", "keybase:carol"] },
+    );
+    expect(getKeybasePluginApprovalApprovers({ cfg: fallback })).toEqual(["roasbeef", "carol"]);
+    expect(getKeybaseExecApprovalApprovers({ cfg: fallback })).toEqual(["roasbeef", "carol"]);
+
+    // No execApprovals at all -> still falls back to allowFrom.
+    const noExec = buildConfig(undefined, { allowFrom: ["roasbeef"] });
+    expect(getKeybasePluginApprovalApprovers({ cfg: noExec })).toEqual(["roasbeef"]);
   });
 
   it("applies agent and session filters to request handling", () => {

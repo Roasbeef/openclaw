@@ -98,7 +98,7 @@ describe("config io paths", () => {
 
       const io = createConfigIO({
         configPath,
-        env: {} as NodeJS.ProcessEnv,
+        env: { HOME: home, VITEST: "true" } as NodeJS.ProcessEnv,
         homedir: () => home,
         logger,
       });

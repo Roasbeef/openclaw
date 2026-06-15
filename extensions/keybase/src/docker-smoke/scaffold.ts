@@ -333,7 +333,11 @@ export async function writeKeybaseDockerSmokeFiles(params: {
     }),
     "utf8",
   );
-  await fs.writeFile(configFile, renderOpenClawConfig(), "utf8");
+  // M-5: this is a generated openclaw.json that the smoke stack mounts into
+  // the bot container. It can carry CLAUDE_CODE_OAUTH_TOKEN refs and other
+  // secret-bearing fields, so write it with a tight 0600 mode rather than
+  // letting the umask decide.
+  await fs.writeFile(configFile, renderOpenClawConfig(), { encoding: "utf8", mode: 0o600 });
   await fs.writeFile(
     secretsReadmeFile,
     "Place a local paper key file here and point KEYBASE_PAPERKEY_FILE at /home/node/.openclaw/secrets/keybase-paperkey.\n",

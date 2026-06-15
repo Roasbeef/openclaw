@@ -126,7 +126,13 @@ export function getKeybasePluginApprovalApprovers(params: {
   accountId?: string | null;
 }): string[] {
   const account = resolveKeybaseAccount({ ...params, cfg: params.cfg as CoreConfig }).config;
+  // M-6: honor execApprovals.approvers as the primary source, falling back to
+  // allowFrom only when approvers is unset or empty. This mirrors
+  // getKeybaseExecApprovalApprovers so an operator who narrows the approver
+  // list for exec approvals doesn't unintentionally leave plugin approvals
+  // tied to the broader DM allowlist.
   return resolveApprovalApprovers({
+    explicit: account.execApprovals?.approvers,
     allowFrom: account.allowFrom,
     normalizeApprover: normalizeKeybaseApproverId,
   });

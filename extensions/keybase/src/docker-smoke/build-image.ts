@@ -19,6 +19,8 @@ export async function defaultRunCommand(
   args: readonly string[],
   cwd: string,
 ): Promise<RunCommandResult> {
+  const timeout =
+    command === "docker" && args[0] === "compose" && args.includes("exec") ? 45_000 : undefined;
   return await new Promise<RunCommandResult>((resolve, reject) => {
     execFile(
       command,
@@ -34,6 +36,7 @@ export async function defaultRunCommand(
               }
             : process.env,
         maxBuffer: 10 * 1024 * 1024,
+        timeout,
       },
       (error, stdout, stderr) => {
         if (error) {

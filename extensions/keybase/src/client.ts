@@ -1,5 +1,4 @@
 import { execFile, spawn, type ChildProcessByStdio } from "node:child_process";
-import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 import { parseKeybaseListenEvent, type KeybaseListenEvent } from "./listen.js";
 import {
@@ -80,6 +79,10 @@ export interface KeybaseListenHandle {
   stop(): void;
 }
 
+type KeybaseApiListenLineReader = {
+  close(): void;
+};
+
 export class KeybaseCliCommandError extends Error {
   readonly args: readonly string[];
   readonly command: string;
@@ -159,6 +162,79 @@ function resolveBinary(options?: KeybaseCliTransportOptions): string {
 function isKeybaseSocketBootstrapError(stderr: string): boolean {
   const normalized = stderr.toLowerCase();
   return normalized.includes("keybased.sock") && normalized.includes("no such file or directory");
+}
+
+function createKeybaseApiListenLineReader(params: {
+  input: Readable;
+  maxLineLength?: number;
+  onError?: (error: Error) => void;
+  onLine: (line: string) => void;
+}): KeybaseApiListenLineReader {
+  const maxLineLength = Math.max(1, params.maxLineLength ?? KEYBASE_READLINE_MAX_LINE_LENGTH);
+  let buffer = "";
+  let discardingOverlongLine = false;
+
+  const reportOverlongLine = () => {
+    params.onError?.(
+      new Error(`Keybase api-listen stdout line exceeded ${maxLineLength} characters`),
+    );
+  };
+
+  const emitLine = (line: string) => {
+    params.onLine(line.endsWith("\r") ? line.slice(0, -1) : line);
+  };
+
+  const onData = (chunk: string | Buffer) => {
+    let text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    while (text.length > 0) {
+      const newlineIndex = text.indexOf("\n");
+      const hasNewline = newlineIndex >= 0;
+      const segment = hasNewline ? text.slice(0, newlineIndex) : text;
+      text = hasNewline ? text.slice(newlineIndex + 1) : "";
+
+      if (discardingOverlongLine) {
+        if (hasNewline) {
+          discardingOverlongLine = false;
+        }
+        continue;
+      }
+
+      if (buffer.length + segment.length > maxLineLength) {
+        buffer = "";
+        discardingOverlongLine = !hasNewline;
+        reportOverlongLine();
+        continue;
+      }
+
+      if (hasNewline) {
+        emitLine(`${buffer}${segment}`);
+        buffer = "";
+      } else {
+        buffer += segment;
+      }
+    }
+  };
+
+  const onEnd = () => {
+    if (!discardingOverlongLine && buffer.length > 0) {
+      emitLine(buffer);
+    }
+    buffer = "";
+    discardingOverlongLine = false;
+  };
+
+  params.input.setEncoding("utf8");
+  params.input.on("data", onData);
+  params.input.on("end", onEnd);
+
+  return {
+    close() {
+      params.input.off("data", onData);
+      params.input.off("end", onEnd);
+      buffer = "";
+      discardingOverlongLine = false;
+    },
+  };
 }
 
 export function buildKeybaseBaseArgs(
@@ -303,6 +379,26 @@ export async function keybaseOneshot(
     KEYBASE_SERVICE: options.env?.KEYBASE_SERVICE ?? process.env.KEYBASE_SERVICE ?? "1",
   };
   const startupTimeoutMs = options.timeoutMs ?? 30_000;
+  const checkReadyOnce = async (): Promise<boolean> => {
+    try {
+      await runCommand(
+        command,
+        buildKeybaseNotificationSettingsArgs({ enableTyping: false }, options),
+        {
+          env: commandEnv,
+          maxBuffer: options.maxBuffer,
+          timeoutMs: Math.min(startupTimeoutMs, 1_000),
+        },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (await checkReadyOnce()) {
+    return;
+  }
 
   await new Promise<void>((resolve, reject) => {
     const child = spawnCommand(command, args, {
@@ -353,30 +449,45 @@ export async function keybaseOneshot(
         }),
       );
     });
+    const buildCloseError = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (signal) {
+        return new KeybaseCliCommandError({
+          args,
+          command,
+          message: `Keybase command failed: ${command} ${args.join(" ")} (signal ${signal})`,
+          stderr,
+        });
+      }
+      return new KeybaseCliCommandError({
+        args,
+        command,
+        message: `Keybase command exited before the service became ready: ${command} ${args.join(" ")}`,
+        stderr,
+        stdout: typeof code === "number" ? `exit=${code}` : undefined,
+      });
+    };
+
+    const finishIfReady = async (): Promise<boolean> => {
+      if (settled) {
+        return true;
+      }
+      if (await checkReadyOnce()) {
+        ready = true;
+        finish();
+        return true;
+      }
+      return false;
+    };
+
     child.once("close", (code, signal) => {
       if (ready) {
         return;
       }
-      if (signal) {
-        finish(
-          new KeybaseCliCommandError({
-            args,
-            command,
-            message: `Keybase command failed: ${command} ${args.join(" ")} (signal ${signal})`,
-            stderr,
-          }),
-        );
-        return;
-      }
-      finish(
-        new KeybaseCliCommandError({
-          args,
-          command,
-          message: `Keybase command exited before the service became ready: ${command} ${args.join(" ")}`,
-          stderr,
-          stdout: typeof code === "number" ? `exit=${code}` : undefined,
-        }),
-      );
+      void finishIfReady().then((isReady) => {
+        if (!isReady) {
+          finish(buildCloseError(code, signal));
+        }
+      });
     });
 
     child.stderr.setEncoding("utf8");
@@ -395,19 +506,7 @@ export async function keybaseOneshot(
       if (settled) {
         return;
       }
-      try {
-        await runCommand(
-          command,
-          buildKeybaseNotificationSettingsArgs({ enableTyping: false }, options),
-          {
-            env: commandEnv,
-            maxBuffer: options.maxBuffer,
-            timeoutMs: Math.min(startupTimeoutMs, 1_000),
-          },
-        );
-        ready = true;
-        finish();
-      } catch {
+      if (!(await finishIfReady())) {
         scheduleReadinessCheck();
       }
     };
@@ -450,7 +549,7 @@ export function startKeybaseApiListen(
   const restartDelayMs = params.restartDelayMs ?? 2_000;
   const maxRestartAttempts = params.restartMaxAttempts ?? KEYBASE_API_LISTEN_MAX_RESTART_ATTEMPTS;
   let activeChild: ChildProcessByStdio<null, Readable, Readable> | null = null;
-  let activeReader: ReturnType<typeof createInterface> | null = null;
+  let activeReader: KeybaseApiListenLineReader | null = null;
   let retryTimer: NodeJS.Timeout | null = null;
   let retryAttempts = 0;
   let restartAttempts = 0;
@@ -510,20 +609,19 @@ export function startKeybaseApiListen(
       }
     });
 
-    const reader = createInterface({
+    const reader = createKeybaseApiListenLineReader({
       input: child.stdout,
-      crlfDelay: Infinity,
-      // maxLineLength caps memory per line; cast because @types/node omits it.
       maxLineLength: KEYBASE_READLINE_MAX_LINE_LENGTH,
-    } as Parameters<typeof createInterface>[0] & { maxLineLength?: number });
-    activeReader = reader;
-    reader.on("line", (line) => {
-      try {
-        params.onEvent(parseKeybaseListenEvent(line));
-      } catch (error) {
-        params.onError?.(error instanceof Error ? error : new Error(String(error)));
-      }
+      onError: params.onError,
+      onLine(line) {
+        try {
+          params.onEvent(parseKeybaseListenEvent(line));
+        } catch (error) {
+          params.onError?.(error instanceof Error ? error : new Error(String(error)));
+        }
+      },
     });
+    activeReader = reader;
 
     child.on("close", (code, signal) => {
       const startedAt = childStartTime;

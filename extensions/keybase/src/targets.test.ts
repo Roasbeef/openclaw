@@ -37,6 +37,22 @@ describe("Keybase target parsing", () => {
     expect(inferKeybaseTargetChatType("lightninglabs#ops")).toBe("group");
   });
 
+  // M-8: an opaque conv:<id> target may refer to a 1:1 DM or to a team
+  // channel; the ID alone doesn't distinguish them. Hard-coding chatType
+  // to "direct" misroutes team conversations as DMs and weakens
+  // DM-policy / approver checks downstream. Leave chatType unset so
+  // callers fall back to the inbound envelope or an API lookup.
+  it("does not assert chatType for opaque conv: targets", () => {
+    const parsed = parseKeybaseTarget("conv:abcd1234");
+    expect(parsed).toEqual({
+      raw: "conv:abcd1234",
+      conversationId: "abcd1234",
+      normalized: "conv:abcd1234",
+    });
+    expect(parsed?.chatType).toBeUndefined();
+    expect(inferKeybaseTargetChatType("conv:abcd1234")).toBeUndefined();
+  });
+
   it("normalizes allowlist entries and DM targets", () => {
     expect(normalizeKeybaseUsername("Keybase:Alice")).toBe("alice");
     expect(normalizeKeybaseAllowEntry("dm:Alice")).toBe("alice");
