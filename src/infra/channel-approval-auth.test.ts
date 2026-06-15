@@ -118,7 +118,7 @@ describe("resolveApprovalCommandAuthorization", () => {
     });
   });
 
-  it("keeps empty approver fallback implicit without bypassing channel sender auth", () => {
+  it("fails closed when approver list is empty (H-2)", () => {
     getChannelPluginMock.mockReturnValue({
       approvalCapability: createResolvedApproverActionAuthAdapter({
         channelLabel: "QuietChat",
@@ -126,15 +126,16 @@ describe("resolveApprovalCommandAuthorization", () => {
       }),
     });
 
-    expect(
-      resolveApprovalCommandAuthorization({
-        cfg: {} as never,
-        channel: "quietchat",
-        accountId: "work",
-        senderId: "uuid:attacker",
-        kind: "exec",
-      }),
-    ).toEqual({ authorized: true, explicit: false });
+    const result = resolveApprovalCommandAuthorization({
+      cfg: {} as never,
+      channel: "quietchat",
+      accountId: "work",
+      senderId: "uuid:attacker",
+      kind: "exec",
+    });
+    expect(result.authorized).toBe(false);
+    expect(result.explicit).toBe(true);
+    expect(result.reason).toMatch(/No approvers configured/);
   });
 
   it("keeps configured approvers explicit when sender matches", () => {

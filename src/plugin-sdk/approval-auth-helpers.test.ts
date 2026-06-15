@@ -1,13 +1,10 @@
 import { describe, expect, it } from "vitest";
-import {
-  createResolvedApproverActionAuthAdapter,
-  isImplicitSameChatApprovalAuthorization,
-} from "./approval-auth-helpers.js";
+import { createResolvedApproverActionAuthAdapter } from "./approval-auth-helpers.js";
 
 describe("createResolvedApproverActionAuthAdapter", () => {
   it.each([
     {
-      name: "falls back to generic same-chat auth when no approvers resolve",
+      name: "fails closed when no approvers resolve (H-2)",
       channelLabel: "Slack",
       resolveApprovers: () => [],
       normalizeSenderId: undefined,
@@ -15,7 +12,11 @@ describe("createResolvedApproverActionAuthAdapter", () => {
         {
           senderId: "U_OWNER",
           approvalKind: "exec" as const,
-          expected: { authorized: true },
+          expected: {
+            authorized: false,
+            reason:
+              "❌ No approvers configured for Slack. Set execApprovals.approvers (or the channel's plugin equivalent) to authorize.",
+          },
         },
       ],
     },
@@ -59,7 +60,7 @@ describe("createResolvedApproverActionAuthAdapter", () => {
     }
   });
 
-  it("marks empty-approver fallback auth as implicit", () => {
+  it("fails closed for any sender when approver list is empty (H-2)", () => {
     const auth = createResolvedApproverActionAuthAdapter({
       channelLabel: "Signal",
       resolveApprovers: () => [],
@@ -71,11 +72,11 @@ describe("createResolvedApproverActionAuthAdapter", () => {
       approvalKind: "exec",
     });
 
-    expect(result).toEqual({ authorized: true });
-    expect(isImplicitSameChatApprovalAuthorization(result)).toBe(true);
+    expect(result.authorized).toBe(false);
+    expect(result.reason).toMatch(/No approvers configured/);
   });
 
-  it("does not mark configured-approver auth as implicit", () => {
+  it("authorizes a configured approver", () => {
     const auth = createResolvedApproverActionAuthAdapter({
       channelLabel: "Signal",
       resolveApprovers: () => ["uuid:owner"],
@@ -88,6 +89,5 @@ describe("createResolvedApproverActionAuthAdapter", () => {
     });
 
     expect(result).toEqual({ authorized: true });
-    expect(isImplicitSameChatApprovalAuthorization(result)).toBe(false);
   });
 });

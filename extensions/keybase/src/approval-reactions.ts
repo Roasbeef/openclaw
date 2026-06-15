@@ -1,6 +1,11 @@
 import type { ExecApprovalReplyDecision } from "openclaw/plugin-sdk/approval-runtime";
 import { normalizeAccountId } from "openclaw/plugin-sdk/routing";
-import { normalizeKeybaseGroupKey, normalizeKeybaseTarget } from "./targets.js";
+import {
+  isKeybaseConversationGroupKey,
+  isKeybaseImplicitTeamGroupKey,
+  normalizeKeybaseGroupKey,
+  normalizeKeybaseTarget,
+} from "./targets.js";
 
 const KEYBASE_APPROVAL_REACTION_META = {
   "allow-once": {
@@ -172,10 +177,27 @@ export function resolveKeybaseApprovalReactionTarget(params: {
   messageId: string | number | null | undefined;
   reactionBody: string;
 }): KeybaseApprovalReactionResolution | null {
-  for (const targetKey of params.targetKeys) {
+  const normalized = params.targetKeys
+    .map((raw) => {
+      const normalizedKey = normalizeTargetKey(raw) ?? raw;
+      return {
+        raw,
+        normalized: normalizedKey,
+        isConv: isKeybaseConversationGroupKey(normalizedKey),
+        isImplicitTeam: isKeybaseImplicitTeamGroupKey(normalizedKey),
+      };
+    })
+    .filter((entry) => entry.normalized);
+  const hasConvCandidate = normalized.some((entry) => entry.isConv);
+  const ordered = [
+    ...normalized.filter((entry) => entry.isConv),
+    ...normalized.filter((entry) => !entry.isConv && !entry.isImplicitTeam),
+    ...(hasConvCandidate ? [] : normalized.filter((entry) => entry.isImplicitTeam)),
+  ];
+  for (const entry of ordered) {
     const key = buildReactionTargetKey({
       accountId: params.accountId,
-      targetKey,
+      targetKey: entry.raw,
       messageId: params.messageId,
     });
     if (!key) {
@@ -195,7 +217,7 @@ export function resolveKeybaseApprovalReactionTarget(params: {
     return {
       approvalId: target.approvalId,
       decision,
-      targetKey,
+      targetKey: entry.raw,
     };
   }
   return null;

@@ -698,8 +698,7 @@ describe("handleApproveCommand", () => {
     expect(callGatewayMock).not.toHaveBeenCalled();
   });
 
-  it("keeps same-chat /approve available to authorized senders when helper approvers are empty", async () => {
-    callGatewayMock.mockResolvedValue({ ok: true });
+  it("fails /approve closed for authorized senders when helper approvers are empty (H-2)", async () => {
     const params = buildApproveParams(
       "/approve abc12345 allow-once",
       {
@@ -720,13 +719,8 @@ describe("handleApproveCommand", () => {
 
     const result = await handleApproveCommand(params, true);
     expect(result?.shouldContinue).toBe(false);
-    expect(result?.reply?.text).toContain("Approval allow-once submitted");
-    expect(callGatewayMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        method: "exec.approval.resolve",
-        params: { id: "abc12345", decision: "allow-once" },
-      }),
-    );
+    expect(result?.reply?.text).toMatch(/No approvers configured/);
+    expect(callGatewayMock).not.toHaveBeenCalled();
   });
 
   it("keeps same-chat /approve available to authorized Keybase senders", async () => {

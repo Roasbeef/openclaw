@@ -25,6 +25,7 @@ import {
   shouldHandleKeybaseApprovalRequest,
 } from "./exec-approvals.js";
 import {
+  buildKeybaseImplicitTeamAliasGroupKey,
   buildKeybaseInboundGroupId,
   buildKeybaseDmTarget,
   normalizeKeybaseGroupKey,
@@ -301,11 +302,20 @@ export function resolveKeybaseApprovalReactionTargetKeys(params: {
           name: channel.name,
           topicName: channel.topicName,
         },
+        conversationId: conversationId ?? undefined,
       }) ?? "",
     );
     if (groupKey) {
       keys.add(groupKey);
       matchedGroup = true;
+    }
+    const isImplicitTeamChat = channel.membersType?.toLowerCase() !== "team" && !channel.topicName;
+    if (isImplicitTeamChat) {
+      const aliasKey = buildKeybaseImplicitTeamAliasGroupKey(channel.name);
+      if (aliasKey) {
+        keys.add(aliasKey);
+        matchedGroup = true;
+      }
     }
   }
   if (!matchedGroup) {

@@ -1,7 +1,53 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { appendKeybaseStderr } from "./client.js";
+
+const KEYBASE_SERVICE_MAX_ATTEMPTS = 5;
+const KEYBASE_SERVICE_KILL_TIMEOUT_MS = 5_000;
+const KEYBASE_SERVICE_SIGKILL_GRACE_MS = 1_000;
+// H-8: bumped from 1s so well-behaved descendants get a real chance to exit on SIGTERM.
+const KEYBASE_LINGERING_PID_TERM_GRACE_MS = 2_000;
+const KEYBASE_LINGERING_PID_ANCESTOR_DEPTH = 8;
+
+async function awaitChildExit(
+  child: ChildProcess,
+  timeoutMs: number = KEYBASE_SERVICE_KILL_TIMEOUT_MS,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      if (graceTimer) {
+        clearTimeout(graceTimer);
+      }
+      resolve();
+    };
+    timer = setTimeout(() => {
+      timer = null;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Process is already gone — fall through and resolve after the grace.
+      }
+      graceTimer = setTimeout(finish, KEYBASE_SERVICE_SIGKILL_GRACE_MS);
+    }, timeoutMs);
+    child.once("close", finish);
+    child.once("exit", finish);
+  });
+}
 
 const DEFAULT_KEYBASE_BINARY = "keybase";
 const DEFAULT_KEYBASE_HOME = "/home/node";
@@ -9,6 +55,7 @@ const DEFAULT_KEYBASE_RUNTIME_DIR = "/tmp/openclaw-keybase";
 const DEFAULT_CONFIG_PATH = "/home/node/.openclaw/openclaw.json";
 
 type ReadFileLike = typeof readFile;
+type ReadlinkLike = (path: string) => Promise<string>;
 type WriteFileLike = typeof writeFile;
 type MkdirLike = typeof mkdir;
 type ReaddirLike = typeof readdir;
@@ -25,6 +72,7 @@ type RuntimeDeps = {
   mkdir: MkdirLike;
   readdir: ReaddirLike;
   readFile: ReadFileLike;
+  readlink: ReadlinkLike;
   rm: RmLike;
   sleep: SleepLike;
   spawn: SpawnLike;
@@ -55,6 +103,7 @@ const defaultRuntimeDeps: RuntimeDeps = {
   mkdir,
   readdir,
   readFile,
+  readlink: (p) => readlink(p),
   rm,
   sleep: async (ms) => {
     await new Promise((resolve) => setTimeout(resolve, ms));
@@ -215,15 +264,20 @@ function buildKeybaseBaseArgs(resolved: ResolvedKeybaseContainerConfig): string[
   return args;
 }
 
-function buildKeybaseCommandEnv(
+export function buildKeybaseCommandEnv(
   resolved: Pick<ResolvedKeybaseContainerConfig, "tmpDir">,
   env: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-  return {
+  const next: NodeJS.ProcessEnv = {
     ...env,
     KEYBASE_SERVICE: normalizeOptionalString(env.KEYBASE_SERVICE) ?? "1",
     TMPDIR: normalizeOptionalString(env.TMPDIR) ?? resolved.tmpDir,
   };
+  // H-5: avoid leaking paper-key material to the wrapped workload
+  delete next.KEYBASE_PAPERKEY;
+  // H-5: avoid leaking paper-key material to the wrapped workload
+  delete next.KEYBASE_PAPERKEY_FILE;
+  return next;
 }
 
 async function waitForKeybaseSocket(
@@ -265,7 +319,7 @@ async function runKeybaseCommand(
     let stderr = "";
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string | Buffer) => {
-      stderr += chunk.toString();
+      stderr = appendKeybaseStderr(stderr, chunk.toString());
     });
     child.once("error", reject);
     child.once("exit", (code, signal) => {
@@ -294,15 +348,115 @@ function isKeybaseLoginRequiredError(error: unknown): boolean {
   return String(error).includes("Login required");
 }
 
-async function findLingeringKeybasePids(
-  deps: Pick<RuntimeDeps, "readFile" | "readdir">,
+function parseStatPpid(raw: string): number | null {
+  // /proc/<pid>/stat is "pid (comm) state ppid pgrp ..." where comm may
+  // contain spaces and parens. Anchor on the LAST `)` and parse from there.
+  const lastParen = raw.lastIndexOf(")");
+  if (lastParen < 0) {
+    return null;
+  }
+  const tail = raw
+    .slice(lastParen + 1)
+    .trim()
+    .split(/\s+/);
+  if (tail.length < 2) {
+    return null;
+  }
+  const ppid = Number.parseInt(tail[1], 10);
+  return Number.isInteger(ppid) && ppid >= 0 ? ppid : null;
+}
+
+async function buildPpidMap(
+  entries: readonly string[],
+  deps: Pick<RuntimeDeps, "readFile">,
+): Promise<Map<number, number>> {
+  const map = new Map<number, number>();
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) {
+      continue;
+    }
+    const pid = Number.parseInt(entry, 10);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue;
+    }
+    let raw: string;
+    try {
+      raw = await deps.readFile(path.join("/proc", entry, "stat"), "utf8");
+    } catch {
+      continue;
+    }
+    const ppid = parseStatPpid(raw);
+    if (ppid !== null) {
+      map.set(pid, ppid);
+    }
+  }
+  return map;
+}
+
+function isDescendantOf(
+  pid: number,
+  ancestor: number,
+  ppidMap: Map<number, number>,
+  maxDepth: number = KEYBASE_LINGERING_PID_ANCESTOR_DEPTH,
+): boolean {
+  let current = pid;
+  for (let i = 0; i < maxDepth; i++) {
+    const parent = ppidMap.get(current);
+    if (parent === undefined) {
+      return false;
+    }
+    if (parent === ancestor) {
+      return true;
+    }
+    if (parent <= 1) {
+      // Reached init/kernel without crossing ancestor.
+      return false;
+    }
+    current = parent;
+  }
+  return false;
+}
+
+async function isHostPidNamespace(deps: Pick<RuntimeDeps, "readlink">): Promise<boolean> {
+  // We only run as PID 1 inside the keybase container. If we are not PID 1
+  // we are necessarily not the namespace root, so we skip this guard and
+  // rely on the descendant check for safety.
+  if (process.pid !== 1) {
+    return false;
+  }
+  try {
+    const link = await deps.readlink("/proc/1/exe");
+    // /proc/<pid>/exe magic-symlink resolves to the absolute path of the
+    // running executable. If we are PID 1 in our own namespace, that is us.
+    return link !== process.execPath;
+  } catch {
+    // Default-deny: if we cannot verify, assume we share the host namespace.
+    return true;
+  }
+}
+
+export async function findLingeringKeybasePids(
+  resolvedBinary: string,
+  keybaseHome: string,
+  deps: Pick<RuntimeDeps, "readFile" | "readdir" | "readlink">,
 ): Promise<number[]> {
+  if (await isHostPidNamespace(deps)) {
+    process.stderr.write(
+      "[keybase] skipping lingering-pid scan: appears to share PID namespace with host\n",
+    );
+    return [];
+  }
+
   let entries: string[];
   try {
     entries = await deps.readdir("/proc");
   } catch {
     return [];
   }
+
+  const ppidMap = await buildPpidMap(entries, deps);
+  const expectedExeBasename = path.basename(resolvedBinary);
+  const expectedEnvToken = `KEYBASE_HOME=${keybaseHome}`;
 
   const pids: number[] = [];
   for (const entry of entries) {
@@ -313,24 +467,45 @@ async function findLingeringKeybasePids(
     if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
       continue;
     }
-    let cmdline: string;
+    if (!isDescendantOf(pid, process.pid, ppidMap)) {
+      continue;
+    }
+
+    let exeLink: string;
     try {
-      cmdline = await deps.readFile(path.join("/proc", entry, "cmdline"), "utf8");
+      exeLink = await deps.readlink(path.join("/proc", entry, "exe"));
+    } catch {
+      // Default-deny on EACCES/ENOENT or any other readlink failure.
+      continue;
+    }
+    if (path.basename(exeLink) !== expectedExeBasename) {
+      continue;
+    }
+    if (exeLink !== resolvedBinary) {
+      continue;
+    }
+
+    let environRaw: string;
+    try {
+      environRaw = await deps.readFile(path.join("/proc", entry, "environ"), "utf8");
     } catch {
       continue;
     }
-    const parts = cmdline.split("\0").filter(Boolean);
-    if (parts.some((part) => path.basename(part) === "keybase")) {
-      pids.push(pid);
+    const envTokens = environRaw.split("\0").filter(Boolean);
+    if (!envTokens.includes(expectedEnvToken)) {
+      continue;
     }
+
+    pids.push(pid);
   }
   return pids;
 }
 
 async function stopLingeringKeybaseProcesses(
-  deps: Pick<RuntimeDeps, "killProcess" | "readFile" | "readdir" | "sleep">,
+  resolved: Pick<ResolvedKeybaseContainerConfig, "binary" | "homeDir">,
+  deps: Pick<RuntimeDeps, "killProcess" | "readFile" | "readdir" | "readlink" | "sleep">,
 ): Promise<void> {
-  const pids = await findLingeringKeybasePids(deps);
+  const pids = await findLingeringKeybasePids(resolved.binary, resolved.homeDir, deps);
   for (const pid of pids) {
     try {
       deps.killProcess(pid, "SIGTERM");
@@ -339,7 +514,7 @@ async function stopLingeringKeybaseProcesses(
     }
   }
   if (pids.length > 0) {
-    await deps.sleep(1_000);
+    await deps.sleep(KEYBASE_LINGERING_PID_TERM_GRACE_MS);
   }
   for (const pid of pids) {
     try {
@@ -353,7 +528,7 @@ async function stopLingeringKeybaseProcesses(
 
 async function stopExistingKeybaseService(
   resolved: ResolvedKeybaseContainerConfig,
-  deps: Pick<RuntimeDeps, "killProcess" | "readFile" | "readdir" | "rm" | "sleep">,
+  deps: Pick<RuntimeDeps, "killProcess" | "readFile" | "readdir" | "readlink" | "rm" | "sleep">,
 ): Promise<void> {
   try {
     const rawPid = await deps.readFile(resolved.pidFile, "utf8");
@@ -375,7 +550,7 @@ async function stopExistingKeybaseService(
   } catch {
     // No pid file is fine; remove any stale socket/pid paths below.
   }
-  await stopLingeringKeybaseProcesses(deps);
+  await stopLingeringKeybaseProcesses(resolved, deps);
   await Promise.all([
     deps.rm(resolved.socketFile, { force: true }),
     deps.rm(resolved.pidFile, { force: true }),
@@ -387,9 +562,8 @@ async function startKeybaseService(
   paperKey: string,
   deps: Pick<
     RuntimeDeps,
-    "killProcess" | "readFile" | "readdir" | "rm" | "sleep" | "spawn" | "stat"
+    "killProcess" | "readFile" | "readdir" | "readlink" | "rm" | "sleep" | "spawn" | "stat"
   >,
-  attempt = 0,
 ): Promise<void> {
   const username = normalizeOptionalString(resolved.username);
   if (!username) {
@@ -397,87 +571,102 @@ async function startKeybaseService(
   }
   const env = buildKeybaseCommandEnv(resolved);
   const args = [...buildKeybaseBaseArgs(resolved), "service", "--oneshot-username", username];
-  const child = deps.spawn(resolved.binary, args, {
-    env,
-    stdio: ["pipe", "ignore", "pipe"],
-  });
 
-  if (!child.stdin) {
-    throw new Error("Keybase service child process did not expose stdin");
-  }
+  let lastError: unknown;
+  for (let attempt = 0; attempt < KEYBASE_SERVICE_MAX_ATTEMPTS; attempt++) {
+    const child = deps.spawn(resolved.binary, args, {
+      env,
+      stdio: ["pipe", "ignore", "pipe"],
+    });
 
-  let stderr = "";
-  let ready = false;
-  let earlyExitError: Error | undefined;
-  let earlyExitAlreadyRunning = false;
-  child.stderr?.setEncoding("utf8");
-  child.stderr?.on("data", (chunk: string | Buffer) => {
-    stderr += chunk.toString();
-  });
-  child.once("exit", (code, signal) => {
-    if (ready) {
-      return;
+    if (!child.stdin) {
+      throw new Error("Keybase service child process did not expose stdin");
     }
-    if (isKeybaseServerAlreadyRunningError(stderr)) {
-      earlyExitAlreadyRunning = true;
-      return;
-    }
-    const reason = signal ? `signal ${signal}` : `status ${code}`;
-    earlyExitError = new Error(`Keybase service exited before readiness (${reason}): ${stderr}`);
-  });
-  child.stdin.end(`${paperKey.trim()}\n`);
 
-  try {
-    await waitForKeybaseSocket(resolved, () => earlyExitError, deps);
-  } catch (error) {
-    if (attempt < 4) {
+    let stderr = "";
+    let ready = false;
+    let earlyExitError: Error | undefined;
+    let earlyExitAlreadyRunning = false;
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string | Buffer) => {
+      stderr = appendKeybaseStderr(stderr, chunk.toString());
+    });
+    child.once("exit", (code, signal) => {
+      if (ready) {
+        return;
+      }
+      if (isKeybaseServerAlreadyRunningError(stderr)) {
+        earlyExitAlreadyRunning = true;
+        return;
+      }
+      const reason = signal ? `signal ${signal}` : `status ${code}`;
+      earlyExitError = new Error(`Keybase service exited before readiness (${reason}): ${stderr}`);
+    });
+    child.stdin.end(`${paperKey.trim()}\n`);
+
+    try {
+      await waitForKeybaseSocket(resolved, () => earlyExitError, deps);
+    } catch (error) {
       if (!child.killed) {
         child.kill();
       }
-      await stopExistingKeybaseService(resolved, deps);
-      await startKeybaseService(resolved, paperKey, deps, attempt + 1);
-      return;
+      await awaitChildExit(child);
+      if (attempt < KEYBASE_SERVICE_MAX_ATTEMPTS - 1) {
+        await stopExistingKeybaseService(resolved, deps);
+        continue;
+      }
+      throw error;
     }
-    throw error;
-  }
 
-  const deadline = Date.now() + 30_000;
-  let lastError: unknown;
-  while (Date.now() < deadline) {
-    if (earlyExitError) {
-      throw earlyExitError;
-    }
-    try {
-      await runKeybaseCommand(
-        resolved.binary,
-        [
-          ...buildKeybaseBaseArgs(resolved),
-          "chat",
-          "notification-settings",
-          "-disable-typing=true",
-        ],
-        env,
-        deps,
-      );
-      ready = true;
-      return;
-    } catch (error) {
-      lastError = error;
+    const deadline = Date.now() + 30_000;
+    lastError = undefined;
+    let readinessReached = false;
+    while (Date.now() < deadline) {
       if (earlyExitError) {
         throw earlyExitError;
       }
-      await deps.sleep(250);
+      try {
+        await runKeybaseCommand(
+          resolved.binary,
+          [
+            ...buildKeybaseBaseArgs(resolved),
+            "chat",
+            "notification-settings",
+            "-disable-typing=true",
+          ],
+          env,
+          deps,
+        );
+        ready = true;
+        readinessReached = true;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (earlyExitError) {
+          throw earlyExitError;
+        }
+        await deps.sleep(250);
+      }
     }
+
+    if (readinessReached) {
+      return;
+    }
+
+    if (!child.killed) {
+      child.kill();
+    }
+    await awaitChildExit(child);
+    if (
+      attempt < KEYBASE_SERVICE_MAX_ATTEMPTS - 1 &&
+      (earlyExitAlreadyRunning || isKeybaseLoginRequiredError(lastError))
+    ) {
+      await stopExistingKeybaseService(resolved, deps);
+      continue;
+    }
+    throw new Error(`Keybase service did not become ready: ${String(lastError)}`);
   }
 
-  if (!child.killed) {
-    child.kill();
-  }
-  if (attempt < 4 && (earlyExitAlreadyRunning || isKeybaseLoginRequiredError(lastError))) {
-    await stopExistingKeybaseService(resolved, deps);
-    await startKeybaseService(resolved, paperKey, deps, attempt + 1);
-    return;
-  }
   throw new Error(`Keybase service did not become ready: ${String(lastError)}`);
 }
 
@@ -534,15 +723,20 @@ export async function prepareKeybaseContainer(
   await startKeybaseService(resolved, paperKey, runtimeDeps);
 }
 
-function buildSpawnEnv(
+export function buildSpawnEnv(
   resolved: Pick<ResolvedKeybaseContainerConfig, "tmpDir">,
   env: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-  return {
+  const next: NodeJS.ProcessEnv = {
     ...env,
     KEYBASE_SERVICE: normalizeOptionalString(env.KEYBASE_SERVICE) ?? "1",
     TMPDIR: normalizeOptionalString(env.TMPDIR) ?? resolved.tmpDir,
   };
+  // H-5: avoid leaking paper-key material to the wrapped workload
+  delete next.KEYBASE_PAPERKEY;
+  // H-5: avoid leaking paper-key material to the wrapped workload
+  delete next.KEYBASE_PAPERKEY_FILE;
+  return next;
 }
 
 function childExitCode(code: number | null, signal: NodeJS.Signals | null): number {

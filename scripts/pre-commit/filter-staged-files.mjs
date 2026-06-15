@@ -22,7 +22,10 @@ if (mode !== "lint" && mode !== "format") {
 
 const lintExts = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
 const formatExts = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".md", ".mdx"]);
-const formatIgnoredPaths = new Set(["src/canvas-host/a2ui/a2ui.bundle.js"]);
+const formatIgnoredPaths = new Set([
+  "src/canvas-host/a2ui/a2ui.bundle.js",
+  "extensions/keybase/docker/container-entrypoint.mjs",
+]);
 
 const shouldSelect = (filePath) => {
   const ext = path.extname(filePath).toLowerCase();

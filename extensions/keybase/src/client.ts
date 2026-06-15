@@ -17,6 +17,24 @@ export interface KeybaseCommandOutput {
 
 export type { KeybaseListenEvent } from "./listen.js";
 
+export const KEYBASE_API_LISTEN_MAX_RESTART_ATTEMPTS = 100;
+export const KEYBASE_API_LISTEN_MAX_BACKOFF_MS = 30_000;
+export const KEYBASE_API_LISTEN_UPTIME_RESET_MS = 30_000;
+export const KEYBASE_STDERR_RING_BYTES = 65_536;
+export const KEYBASE_READLINE_MAX_LINE_LENGTH = 1_048_576;
+
+export function appendKeybaseStderr(
+  buffer: string,
+  chunk: string,
+  maxBytes: number = KEYBASE_STDERR_RING_BYTES,
+): string {
+  const combined = buffer + chunk;
+  if (combined.length <= maxBytes) {
+    return combined;
+  }
+  return combined.slice(combined.length - maxBytes);
+}
+
 export interface KeybaseCommandRunOptions {
   env?: NodeJS.ProcessEnv;
   maxBuffer?: number;
@@ -321,38 +339,9 @@ export async function keybaseOneshot(
       resolve();
     };
 
-    const scheduleReadinessCheck = () => {
-      retryTimer = setTimeout(() => {
-        retryTimer = undefined;
-        void checkReady();
-      }, 250);
-    };
-
-    const checkReady = async () => {
-      if (settled) {
-        return;
-      }
-      try {
-        await runCommand(
-          command,
-          buildKeybaseNotificationSettingsArgs({ enableTyping: false }, options),
-          {
-            env: commandEnv,
-            maxBuffer: options.maxBuffer,
-            timeoutMs: Math.min(startupTimeoutMs, 1_000),
-          },
-        );
-        ready = true;
-        finish();
-      } catch {
-        scheduleReadinessCheck();
-      }
-    };
-
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string | Buffer) => {
-      stderr += chunk.toString();
-    });
+    // Attach error/close listeners immediately after the stdio guard so a
+    // synchronous spawn failure (e.g., ENOENT delivered on the next tick) is
+    // never lost between spawn and stdin.end.
     child.once("error", (error) => {
       finish(
         new KeybaseCliCommandError({
@@ -390,6 +379,39 @@ export async function keybaseOneshot(
       );
     });
 
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string | Buffer) => {
+      stderr = appendKeybaseStderr(stderr, chunk.toString());
+    });
+
+    const scheduleReadinessCheck = () => {
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        void checkReady();
+      }, 250);
+    };
+
+    const checkReady = async () => {
+      if (settled) {
+        return;
+      }
+      try {
+        await runCommand(
+          command,
+          buildKeybaseNotificationSettingsArgs({ enableTyping: false }, options),
+          {
+            env: commandEnv,
+            maxBuffer: options.maxBuffer,
+            timeoutMs: Math.min(startupTimeoutMs, 1_000),
+          },
+        );
+        ready = true;
+        finish();
+      } catch {
+        scheduleReadinessCheck();
+      }
+    };
+
     timeout = setTimeout(() => {
       if (!child.killed) {
         child.kill();
@@ -426,12 +448,14 @@ export function startKeybaseApiListen(
   const maxBootstrapRetries = params.bootstrapRetryMaxAttempts ?? 8;
   const bootstrapRetryDelayMs = params.bootstrapRetryDelayMs ?? 750;
   const restartDelayMs = params.restartDelayMs ?? 2_000;
-  const maxRestartAttempts = params.restartMaxAttempts ?? Number.POSITIVE_INFINITY;
+  const maxRestartAttempts = params.restartMaxAttempts ?? KEYBASE_API_LISTEN_MAX_RESTART_ATTEMPTS;
   let activeChild: ChildProcessByStdio<null, Readable, Readable> | null = null;
   let activeReader: ReturnType<typeof createInterface> | null = null;
   let retryTimer: NodeJS.Timeout | null = null;
   let retryAttempts = 0;
   let restartAttempts = 0;
+  let currentRestartDelayMs = restartDelayMs;
+  let childStartTime: number | null = null;
   let stopped = false;
 
   const clearRetryTimer = () => {
@@ -469,6 +493,7 @@ export function startKeybaseApiListen(
       },
     );
     activeChild = child;
+    childStartTime = Date.now();
 
     if (!child.stdout || !child.stderr) {
       throw new Error("Keybase api-listen child process did not expose stdout/stderr");
@@ -477,7 +502,7 @@ export function startKeybaseApiListen(
     let stderr = "";
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string | Buffer) => {
-      stderr += chunk.toString();
+      stderr = appendKeybaseStderr(stderr, chunk.toString());
     });
     child.on("error", (error) => {
       if (!stopped) {
@@ -485,7 +510,12 @@ export function startKeybaseApiListen(
       }
     });
 
-    const reader = createInterface({ input: child.stdout });
+    const reader = createInterface({
+      input: child.stdout,
+      crlfDelay: Infinity,
+      // maxLineLength caps memory per line; cast because @types/node omits it.
+      maxLineLength: KEYBASE_READLINE_MAX_LINE_LENGTH,
+    } as Parameters<typeof createInterface>[0] & { maxLineLength?: number });
     activeReader = reader;
     reader.on("line", (line) => {
       try {
@@ -496,6 +526,8 @@ export function startKeybaseApiListen(
     });
 
     child.on("close", (code, signal) => {
+      const startedAt = childStartTime;
+      childStartTime = null;
       if (activeReader === reader) {
         reader.close();
         activeReader = null;
@@ -513,10 +545,20 @@ export function startKeybaseApiListen(
         scheduleLaunch(bootstrapRetryDelayMs);
         return;
       }
+      if (startedAt !== null && Date.now() - startedAt >= KEYBASE_API_LISTEN_UPTIME_RESET_MS) {
+        restartAttempts = 0;
+        currentRestartDelayMs = restartDelayMs;
+      }
       params.onExit?.({ code, signal, stderr });
       if (!stopped && params.restartOnExit && restartAttempts < maxRestartAttempts) {
         restartAttempts += 1;
-        scheduleLaunch(restartDelayMs);
+        const jitter = 0.8 + Math.random() * 0.4;
+        const delay = currentRestartDelayMs * jitter;
+        currentRestartDelayMs = Math.min(
+          currentRestartDelayMs * 2,
+          KEYBASE_API_LISTEN_MAX_BACKOFF_MS,
+        );
+        scheduleLaunch(delay);
       }
     });
   }

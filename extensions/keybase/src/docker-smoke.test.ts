@@ -38,7 +38,14 @@ describe("keybase-entrypoint.sh", () => {
       "utf8",
     );
 
-    const probePath = path.join(outputDir, "probe.mjs");
+    // The wrapper enforces that any OPENCLAW_KEYBASE_CONTAINER_ENTRYPOINT
+    // override lives under its own directory, so write the probe alongside
+    // the wrapper with a unique name and clean it up afterwards.
+    const wrapperDir = path.resolve("extensions/keybase/docker");
+    const probePath = path.join(wrapperDir, `probe-${process.pid}-${Date.now()}.mjs`);
+    cleanups.push(async () => {
+      await rm(probePath, { force: true });
+    });
     const probeOutputPath = path.join(outputDir, "probe-output.json");
     await writeFile(
       probePath,
@@ -67,6 +74,7 @@ describe("keybase-entrypoint.sh", () => {
           ...process.env,
           OPENCLAW_CONFIGURE_GITHUB_TOKEN: "0",
           OPENCLAW_KEYBASE_CONTAINER_ENTRYPOINT: probePath,
+          OPENCLAW_KEYBASE_TESTING: "1",
           OPENCLAW_SECRET_ENV_DIR: secretsDir,
         },
       },

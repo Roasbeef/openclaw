@@ -1,8 +1,47 @@
 // Generated from extensions/keybase/src/container-entrypoint.ts. Do not edit by hand.
 import { spawn } from "node:child_process";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { appendKeybaseStderr } from "./client.js";
+const KEYBASE_SERVICE_MAX_ATTEMPTS = 5;
+const KEYBASE_SERVICE_KILL_TIMEOUT_MS = 5e3;
+const KEYBASE_SERVICE_SIGKILL_GRACE_MS = 1e3;
+const KEYBASE_LINGERING_PID_TERM_GRACE_MS = 2e3;
+const KEYBASE_LINGERING_PID_ANCESTOR_DEPTH = 8;
+async function awaitChildExit(child, timeoutMs = KEYBASE_SERVICE_KILL_TIMEOUT_MS) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  await new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    let graceTimer = null;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      if (graceTimer) {
+        clearTimeout(graceTimer);
+      }
+      resolve();
+    };
+    timer = setTimeout(() => {
+      timer = null;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+      }
+      graceTimer = setTimeout(finish, KEYBASE_SERVICE_SIGKILL_GRACE_MS);
+    }, timeoutMs);
+    child.once("close", finish);
+    child.once("exit", finish);
+  });
+}
 const DEFAULT_KEYBASE_BINARY = "keybase";
 const DEFAULT_KEYBASE_HOME = "/home/node";
 const DEFAULT_KEYBASE_RUNTIME_DIR = "/tmp/openclaw-keybase";
@@ -14,13 +53,14 @@ const defaultRuntimeDeps = {
   mkdir,
   readdir,
   readFile,
+  readlink: (p) => readlink(p),
   rm,
   sleep: async (ms) => {
     await new Promise((resolve) => setTimeout(resolve, ms));
   },
   spawn,
   stat,
-  writeFile,
+  writeFile
 };
 function normalizeOptionalString(value) {
   if (typeof value !== "string") {
@@ -54,8 +94,7 @@ function isRecord(value) {
 }
 function resolveKeybaseContainerConfig(env = process.env) {
   const configPath = normalizeOptionalString(env.OPENCLAW_CONFIG_PATH) ?? DEFAULT_CONFIG_PATH;
-  const runtimeDir =
-    normalizeOptionalString(env.OPENCLAW_KEYBASE_RUNTIME_DIR) ?? DEFAULT_KEYBASE_RUNTIME_DIR;
+  const runtimeDir = normalizeOptionalString(env.OPENCLAW_KEYBASE_RUNTIME_DIR) ?? DEFAULT_KEYBASE_RUNTIME_DIR;
   return {
     autoOneshot: isTruthy(env.OPENCLAW_KEYBASE_AUTO_ONESHOT, true),
     binary: normalizeOptionalString(env.OPENCLAW_KEYBASE_BINARY) ?? DEFAULT_KEYBASE_BINARY,
@@ -63,18 +102,11 @@ function resolveKeybaseContainerConfig(env = process.env) {
     homeDir: normalizeOptionalString(env.OPENCLAW_KEYBASE_HOME) ?? DEFAULT_KEYBASE_HOME,
     paperKey: normalizeOptionalString(env.KEYBASE_PAPERKEY),
     paperKeyFile: normalizeOptionalString(env.KEYBASE_PAPERKEY_FILE),
-    pidFile:
-      normalizeOptionalString(env.OPENCLAW_KEYBASE_PID_FILE) ??
-      path.join(runtimeDir, "keybased.pid"),
+    pidFile: normalizeOptionalString(env.OPENCLAW_KEYBASE_PID_FILE) ?? path.join(runtimeDir, "keybased.pid"),
     runtimeDir,
-    socketFile:
-      normalizeOptionalString(env.OPENCLAW_KEYBASE_SOCKET_FILE) ??
-      path.join(runtimeDir, "keybased.sock"),
-    tmpDir:
-      normalizeOptionalString(env.OPENCLAW_TMPDIR) ??
-      normalizeOptionalString(env.TMPDIR) ??
-      path.join(path.dirname(configPath), "tmp"),
-    username: normalizeOptionalString(env.KEYBASE_USERNAME),
+    socketFile: normalizeOptionalString(env.OPENCLAW_KEYBASE_SOCKET_FILE) ?? path.join(runtimeDir, "keybased.sock"),
+    tmpDir: normalizeOptionalString(env.OPENCLAW_TMPDIR) ?? normalizeOptionalString(env.TMPDIR) ?? path.join(path.dirname(configPath), "tmp"),
+    username: normalizeOptionalString(env.KEYBASE_USERNAME)
   };
 }
 function applyKeybaseContainerConfig(existing, resolved) {
@@ -123,7 +155,7 @@ async function readExistingConfig(configPath, deps) {
       return {};
     }
     throw new Error(`Could not read OpenClaw config at ${configPath}: ${String(error)}`, {
-      cause: error,
+      cause: error
     });
   }
 }
@@ -152,11 +184,14 @@ function buildKeybaseBaseArgs(resolved) {
   return args;
 }
 function buildKeybaseCommandEnv(resolved, env = process.env) {
-  return {
+  const next = {
     ...env,
     KEYBASE_SERVICE: normalizeOptionalString(env.KEYBASE_SERVICE) ?? "1",
-    TMPDIR: normalizeOptionalString(env.TMPDIR) ?? resolved.tmpDir,
+    TMPDIR: normalizeOptionalString(env.TMPDIR) ?? resolved.tmpDir
   };
+  delete next.KEYBASE_PAPERKEY;
+  delete next.KEYBASE_PAPERKEY_FILE;
+  return next;
 }
 async function waitForKeybaseSocket(resolved, getEarlyExitError, deps) {
   const deadline = Date.now() + 6e4;
@@ -175,19 +210,19 @@ async function waitForKeybaseSocket(resolved, getEarlyExitError, deps) {
     }
   }
   throw new Error(
-    `Keybase service socket did not appear at ${resolved.socketFile}: ${String(lastError)}`,
+    `Keybase service socket did not appear at ${resolved.socketFile}: ${String(lastError)}`
   );
 }
 async function runKeybaseCommand(command, args, env, deps) {
   await new Promise((resolve, reject) => {
     const child = deps.spawn(command, [...args], {
       env,
-      stdio: ["ignore", "ignore", "pipe"],
+      stdio: ["ignore", "ignore", "pipe"]
     });
     let stderr = "";
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk) => {
-      stderr += chunk.toString();
+      stderr = appendKeybaseStderr(stderr, chunk.toString());
     });
     child.once("error", reject);
     child.once("exit", (code, signal) => {
@@ -204,22 +239,90 @@ async function runKeybaseCommand(command, args, env, deps) {
   });
 }
 function isKeybaseServerAlreadyRunningError(stderr) {
-  return (
-    stderr.includes("server already running") ||
-    stderr.includes("error locking") ||
-    stderr.includes("resource temporarily unavailable")
-  );
+  return stderr.includes("server already running") || stderr.includes("error locking") || stderr.includes("resource temporarily unavailable");
 }
 function isKeybaseLoginRequiredError(error) {
   return String(error).includes("Login required");
 }
-async function findLingeringKeybasePids(deps) {
+function parseStatPpid(raw) {
+  const lastParen = raw.lastIndexOf(")");
+  if (lastParen < 0) {
+    return null;
+  }
+  const tail = raw.slice(lastParen + 1).trim().split(/\s+/);
+  if (tail.length < 2) {
+    return null;
+  }
+  const ppid = Number.parseInt(tail[1], 10);
+  return Number.isInteger(ppid) && ppid >= 0 ? ppid : null;
+}
+async function buildPpidMap(entries, deps) {
+  const map = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) {
+      continue;
+    }
+    const pid = Number.parseInt(entry, 10);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue;
+    }
+    let raw;
+    try {
+      raw = await deps.readFile(path.join("/proc", entry, "stat"), "utf8");
+    } catch {
+      continue;
+    }
+    const ppid = parseStatPpid(raw);
+    if (ppid !== null) {
+      map.set(pid, ppid);
+    }
+  }
+  return map;
+}
+function isDescendantOf(pid, ancestor, ppidMap, maxDepth = KEYBASE_LINGERING_PID_ANCESTOR_DEPTH) {
+  let current = pid;
+  for (let i = 0; i < maxDepth; i++) {
+    const parent = ppidMap.get(current);
+    if (parent === void 0) {
+      return false;
+    }
+    if (parent === ancestor) {
+      return true;
+    }
+    if (parent <= 1) {
+      return false;
+    }
+    current = parent;
+  }
+  return false;
+}
+async function isHostPidNamespace(deps) {
+  if (process.pid !== 1) {
+    return false;
+  }
+  try {
+    const link = await deps.readlink("/proc/1/exe");
+    return link !== process.execPath;
+  } catch {
+    return true;
+  }
+}
+async function findLingeringKeybasePids(resolvedBinary, keybaseHome, deps) {
+  if (await isHostPidNamespace(deps)) {
+    process.stderr.write(
+      "[keybase] skipping lingering-pid scan: appears to share PID namespace with host\n"
+    );
+    return [];
+  }
   let entries;
   try {
     entries = await deps.readdir("/proc");
   } catch {
     return [];
   }
+  const ppidMap = await buildPpidMap(entries, deps);
+  const expectedExeBasename = path.basename(resolvedBinary);
+  const expectedEnvToken = `KEYBASE_HOME=${keybaseHome}`;
   const pids = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) {
@@ -229,34 +332,52 @@ async function findLingeringKeybasePids(deps) {
     if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
       continue;
     }
-    let cmdline;
+    if (!isDescendantOf(pid, process.pid, ppidMap)) {
+      continue;
+    }
+    let exeLink;
     try {
-      cmdline = await deps.readFile(path.join("/proc", entry, "cmdline"), "utf8");
+      exeLink = await deps.readlink(path.join("/proc", entry, "exe"));
     } catch {
       continue;
     }
-    const parts = cmdline.split("\0").filter(Boolean);
-    if (parts.some((part) => path.basename(part) === "keybase")) {
-      pids.push(pid);
+    if (path.basename(exeLink) !== expectedExeBasename) {
+      continue;
     }
+    if (exeLink !== resolvedBinary) {
+      continue;
+    }
+    let environRaw;
+    try {
+      environRaw = await deps.readFile(path.join("/proc", entry, "environ"), "utf8");
+    } catch {
+      continue;
+    }
+    const envTokens = environRaw.split("\0").filter(Boolean);
+    if (!envTokens.includes(expectedEnvToken)) {
+      continue;
+    }
+    pids.push(pid);
   }
   return pids;
 }
-async function stopLingeringKeybaseProcesses(deps) {
-  const pids = await findLingeringKeybasePids(deps);
+async function stopLingeringKeybaseProcesses(resolved, deps) {
+  const pids = await findLingeringKeybasePids(resolved.binary, resolved.homeDir, deps);
   for (const pid of pids) {
     try {
       deps.killProcess(pid, "SIGTERM");
-    } catch {}
+    } catch {
+    }
   }
   if (pids.length > 0) {
-    await deps.sleep(1e3);
+    await deps.sleep(KEYBASE_LINGERING_PID_TERM_GRACE_MS);
   }
   for (const pid of pids) {
     try {
       deps.killProcess(pid, 0);
       deps.killProcess(pid, "SIGKILL");
-    } catch {}
+    } catch {
+    }
   }
 }
 async function stopExistingKeybaseService(resolved, deps) {
@@ -267,102 +388,114 @@ async function stopExistingKeybaseService(resolved, deps) {
       try {
         deps.killProcess(pid, "SIGTERM");
         await deps.sleep(1e3);
-      } catch {}
+      } catch {
+      }
       try {
         deps.killProcess(pid, 0);
         deps.killProcess(pid, "SIGKILL");
-      } catch {}
+      } catch {
+      }
     }
-  } catch {}
-  await stopLingeringKeybaseProcesses(deps);
+  } catch {
+  }
+  await stopLingeringKeybaseProcesses(resolved, deps);
   await Promise.all([
     deps.rm(resolved.socketFile, { force: true }),
-    deps.rm(resolved.pidFile, { force: true }),
+    deps.rm(resolved.pidFile, { force: true })
   ]);
 }
-async function startKeybaseService(resolved, paperKey, deps, attempt = 0) {
+async function startKeybaseService(resolved, paperKey, deps) {
   const username = normalizeOptionalString(resolved.username);
   if (!username) {
     throw new Error("KEYBASE_USERNAME is required to start the Keybase service.");
   }
   const env = buildKeybaseCommandEnv(resolved);
   const args = [...buildKeybaseBaseArgs(resolved), "service", "--oneshot-username", username];
-  const child = deps.spawn(resolved.binary, args, {
-    env,
-    stdio: ["pipe", "ignore", "pipe"],
-  });
-  if (!child.stdin) {
-    throw new Error("Keybase service child process did not expose stdin");
-  }
-  let stderr = "";
-  let ready = false;
-  let earlyExitError;
-  let earlyExitAlreadyRunning = false;
-  child.stderr?.setEncoding("utf8");
-  child.stderr?.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
-  child.once("exit", (code, signal) => {
-    if (ready) {
-      return;
+  let lastError;
+  for (let attempt = 0; attempt < KEYBASE_SERVICE_MAX_ATTEMPTS; attempt++) {
+    const child = deps.spawn(resolved.binary, args, {
+      env,
+      stdio: ["pipe", "ignore", "pipe"]
+    });
+    if (!child.stdin) {
+      throw new Error("Keybase service child process did not expose stdin");
     }
-    if (isKeybaseServerAlreadyRunningError(stderr)) {
-      earlyExitAlreadyRunning = true;
-      return;
-    }
-    const reason = signal ? `signal ${signal}` : `status ${code}`;
-    earlyExitError = new Error(`Keybase service exited before readiness (${reason}): ${stderr}`);
-  });
-  child.stdin.end(`${paperKey.trim()}
+    let stderr = "";
+    let ready = false;
+    let earlyExitError;
+    let earlyExitAlreadyRunning = false;
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderr = appendKeybaseStderr(stderr, chunk.toString());
+    });
+    child.once("exit", (code, signal) => {
+      if (ready) {
+        return;
+      }
+      if (isKeybaseServerAlreadyRunningError(stderr)) {
+        earlyExitAlreadyRunning = true;
+        return;
+      }
+      const reason = signal ? `signal ${signal}` : `status ${code}`;
+      earlyExitError = new Error(`Keybase service exited before readiness (${reason}): ${stderr}`);
+    });
+    child.stdin.end(`${paperKey.trim()}
 `);
-  try {
-    await waitForKeybaseSocket(resolved, () => earlyExitError, deps);
-  } catch (error) {
-    if (attempt < 4) {
+    try {
+      await waitForKeybaseSocket(resolved, () => earlyExitError, deps);
+    } catch (error) {
       if (!child.killed) {
         child.kill();
       }
-      await stopExistingKeybaseService(resolved, deps);
-      await startKeybaseService(resolved, paperKey, deps, attempt + 1);
-      return;
+      await awaitChildExit(child);
+      if (attempt < KEYBASE_SERVICE_MAX_ATTEMPTS - 1) {
+        await stopExistingKeybaseService(resolved, deps);
+        continue;
+      }
+      throw error;
     }
-    throw error;
-  }
-  const deadline = Date.now() + 3e4;
-  let lastError;
-  while (Date.now() < deadline) {
-    if (earlyExitError) {
-      throw earlyExitError;
-    }
-    try {
-      await runKeybaseCommand(
-        resolved.binary,
-        [
-          ...buildKeybaseBaseArgs(resolved),
-          "chat",
-          "notification-settings",
-          "-disable-typing=true",
-        ],
-        env,
-        deps,
-      );
-      ready = true;
-      return;
-    } catch (error) {
-      lastError = error;
+    const deadline = Date.now() + 3e4;
+    lastError = void 0;
+    let readinessReached = false;
+    while (Date.now() < deadline) {
       if (earlyExitError) {
         throw earlyExitError;
       }
-      await deps.sleep(250);
+      try {
+        await runKeybaseCommand(
+          resolved.binary,
+          [
+            ...buildKeybaseBaseArgs(resolved),
+            "chat",
+            "notification-settings",
+            "-disable-typing=true"
+          ],
+          env,
+          deps
+        );
+        ready = true;
+        readinessReached = true;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (earlyExitError) {
+          throw earlyExitError;
+        }
+        await deps.sleep(250);
+      }
     }
-  }
-  if (!child.killed) {
-    child.kill();
-  }
-  if (attempt < 4 && (earlyExitAlreadyRunning || isKeybaseLoginRequiredError(lastError))) {
-    await stopExistingKeybaseService(resolved, deps);
-    await startKeybaseService(resolved, paperKey, deps, attempt + 1);
-    return;
+    if (readinessReached) {
+      return;
+    }
+    if (!child.killed) {
+      child.kill();
+    }
+    await awaitChildExit(child);
+    if (attempt < KEYBASE_SERVICE_MAX_ATTEMPTS - 1 && (earlyExitAlreadyRunning || isKeybaseLoginRequiredError(lastError))) {
+      await stopExistingKeybaseService(resolved, deps);
+      continue;
+    }
+    throw new Error(`Keybase service did not become ready: ${String(lastError)}`);
   }
   throw new Error(`Keybase service did not become ready: ${String(lastError)}`);
 }
@@ -373,7 +506,7 @@ async function isExistingKeybaseServiceReady(resolved, deps) {
       resolved.binary,
       [...buildKeybaseBaseArgs(resolved), "whoami"],
       buildKeybaseCommandEnv(resolved),
-      deps,
+      deps
     );
     return true;
   } catch {
@@ -390,13 +523,13 @@ async function prepareKeybaseContainer(resolved, deps = {}) {
   await runtimeDeps.mkdir(resolved.tmpDir, { recursive: true });
   const nextConfig = applyKeybaseContainerConfig(
     await readExistingConfig(resolved.configPath, runtimeDeps),
-    resolved,
+    resolved
   );
   await runtimeDeps.writeFile(
     resolved.configPath,
     `${JSON.stringify(nextConfig, null, 2)}
 `,
-    "utf8",
+    "utf8"
   );
   const paperKey = await resolvePaperKey(resolved, runtimeDeps);
   if (!resolved.autoOneshot || !resolved.username || !paperKey) {
@@ -409,11 +542,14 @@ async function prepareKeybaseContainer(resolved, deps = {}) {
   await startKeybaseService(resolved, paperKey, runtimeDeps);
 }
 function buildSpawnEnv(resolved, env = process.env) {
-  return {
+  const next = {
     ...env,
     KEYBASE_SERVICE: normalizeOptionalString(env.KEYBASE_SERVICE) ?? "1",
-    TMPDIR: normalizeOptionalString(env.TMPDIR) ?? resolved.tmpDir,
+    TMPDIR: normalizeOptionalString(env.TMPDIR) ?? resolved.tmpDir
   };
+  delete next.KEYBASE_PAPERKEY;
+  delete next.KEYBASE_PAPERKEY_FILE;
+  return next;
 }
 function childExitCode(code, signal) {
   if (signal) {
@@ -501,7 +637,7 @@ async function runKeybaseContainerEntrypoint(argv, deps = {}) {
   await prepareKeybaseContainer(resolved, runtimeDeps);
   const child = runtimeDeps.spawn(argv[0], argv.slice(1), {
     env: buildSpawnEnv(resolved),
-    stdio: "inherit",
+    stdio: "inherit"
   });
   return await waitForManagedChild(child);
 }
@@ -511,8 +647,7 @@ async function main(argv = process.argv.slice(2)) {
     process.exitCode = exitCode;
   }
 }
-const isMainModule =
-  typeof process.argv[1] === "string" && import.meta.url === pathToFileURL(process.argv[1]).href;
+const isMainModule = typeof process.argv[1] === "string" && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMainModule) {
   await main().catch((error) => {
     process.stderr.write(`Keybase container entrypoint failed: ${String(error)}
@@ -522,8 +657,11 @@ if (isMainModule) {
 }
 export {
   applyKeybaseContainerConfig,
+  buildKeybaseCommandEnv,
+  buildSpawnEnv,
+  findLingeringKeybasePids,
   main,
   prepareKeybaseContainer,
   resolveKeybaseContainerConfig,
-  runKeybaseContainerEntrypoint,
+  runKeybaseContainerEntrypoint
 };

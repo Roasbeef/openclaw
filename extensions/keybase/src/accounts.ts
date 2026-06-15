@@ -106,6 +106,7 @@ export function resolveKeybaseAccount(params: {
     dmPolicy: merged.dmPolicy ?? "pairing",
     groupPolicy: merged.groupPolicy ?? "allowlist",
     groups: normalizeKeybaseGroups(merged.groups),
+    multiPartyDmPolicy: merged.multiPartyDmPolicy ?? "deny",
     ...(normalizeOptionalString(merged.defaultTo)
       ? { defaultTo: normalizeOptionalString(merged.defaultTo) }
       : {}),

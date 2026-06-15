@@ -17,10 +17,5 @@
       "KEYBASE_PAPERKEY",
       "KEYBASE_PAPERKEY_FILE"
     ]
-  },
-  "configSchema": {
-    "type": "object",
-    "additionalProperties": false,
-    "properties": {}
   }
 }

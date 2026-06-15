@@ -6448,6 +6448,52 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
           },
           additionalProperties: false,
         },
+        execApprovals: {
+          type: "object",
+          properties: {
+            enabled: {
+              anyOf: [
+                {
+                  type: "boolean",
+                },
+                {
+                  type: "string",
+                  const: "auto",
+                },
+              ],
+            },
+            approvers: {
+              type: "array",
+              items: {
+                anyOf: [
+                  {
+                    type: "string",
+                  },
+                  {
+                    type: "number",
+                  },
+                ],
+              },
+            },
+            agentFilter: {
+              type: "array",
+              items: {
+                type: "string",
+              },
+            },
+            sessionFilter: {
+              type: "array",
+              items: {
+                type: "string",
+              },
+            },
+            target: {
+              type: "string",
+              enum: ["dm", "channel", "both"],
+            },
+          },
+          additionalProperties: false,
+        },
         defaultTo: {
           type: "string",
         },
@@ -6494,6 +6540,10 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
             },
             additionalProperties: false,
           },
+        },
+        multiPartyDmPolicy: {
+          type: "string",
+          enum: ["allow", "deny"],
         },
         accounts: {
           type: "object",
@@ -6589,6 +6639,52 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
                 },
                 additionalProperties: false,
               },
+              execApprovals: {
+                type: "object",
+                properties: {
+                  enabled: {
+                    anyOf: [
+                      {
+                        type: "boolean",
+                      },
+                      {
+                        type: "string",
+                        const: "auto",
+                      },
+                    ],
+                  },
+                  approvers: {
+                    type: "array",
+                    items: {
+                      anyOf: [
+                        {
+                          type: "string",
+                        },
+                        {
+                          type: "number",
+                        },
+                      ],
+                    },
+                  },
+                  agentFilter: {
+                    type: "array",
+                    items: {
+                      type: "string",
+                    },
+                  },
+                  sessionFilter: {
+                    type: "array",
+                    items: {
+                      type: "string",
+                    },
+                  },
+                  target: {
+                    type: "string",
+                    enum: ["dm", "channel", "both"],
+                  },
+                },
+                additionalProperties: false,
+              },
               defaultTo: {
                 type: "string",
               },
@@ -6635,6 +6731,10 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
                   },
                   additionalProperties: false,
                 },
+              },
+              multiPartyDmPolicy: {
+                type: "string",
+                enum: ["allow", "deny"],
               },
             },
             additionalProperties: false,

@@ -47,7 +47,7 @@ describe("keybase native approvals", () => {
     });
   });
 
-  it("uses implicit same-chat text authorization when approvers are not configured", () => {
+  it("fails closed when approvers are not configured (H-2)", () => {
     const result = keybaseApprovalCapability.authorizeActorAction?.({
       cfg: {
         channels: {
@@ -63,7 +63,8 @@ describe("keybase native approvals", () => {
       approvalKind: "exec",
     });
 
-    expect(result).toMatchObject({ authorized: true });
+    expect(result?.authorized).toBe(false);
+    expect(result?.reason).toMatch(/No approvers configured/);
     expect(
       keybaseApprovalCapability.getActionAvailabilityState?.({
         cfg: buildConfig(),

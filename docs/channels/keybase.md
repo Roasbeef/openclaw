@@ -295,9 +295,17 @@ Example injected env:
 
 ```sh
 export KEYBASE_USERNAME="openclaw-bot"
-export KEYBASE_PAPERKEY="..."
+export KEYBASE_PAPERKEY_FILE="/vault/secrets/keybase-paperkey"
 export CLAUDE_CODE_OAUTH_TOKEN="..."
 ```
+
+`KEYBASE_PAPERKEY_FILE` (recommended) points at a file the entrypoint reads on
+demand, so the secret never sits in `/proc/<pid>/environ` for the wrapped
+workload.
+
+Inline `KEYBASE_PAPERKEY` is supported but discouraged: it exposes the key in
+`/proc/<pid>/environ` and may appear in heap dumps. Prefer
+`KEYBASE_PAPERKEY_FILE` for production.
 
 Recommended Kubernetes shape:
 
@@ -357,10 +365,12 @@ Notes:
   avoid Docker Desktop shared-volume Unix socket issues.
 - Set `CLAUDE_CODE_OAUTH_TOKEN` in `.env` from `claude setup-token` so the
   Claude child process can authenticate inside the container.
-- For local paper key reuse, either export `KEYBASE_PAPERKEY="$(< /path/to/paper_key.txt)"`
-  before `docker compose up`, or place the secret under
+- For local paper key reuse, prefer the file form: place the secret under
   `state/home/.openclaw/secrets/keybase-paperkey` and point
-  `KEYBASE_PAPERKEY_FILE=/home/node/.openclaw/secrets/keybase-paperkey`.
+  `KEYBASE_PAPERKEY_FILE=/home/node/.openclaw/secrets/keybase-paperkey`
+  (recommended). Inline `KEYBASE_PAPERKEY="$(< /path/to/paper_key.txt)"` is
+  supported but exposes the key in `/proc/<pid>/environ` and may appear in heap
+  dumps; use only for short-lived experiments.
 - The smoke path currently defaults to `linux/amd64` because the official
   Keybase Linux package is amd64-oriented.
 

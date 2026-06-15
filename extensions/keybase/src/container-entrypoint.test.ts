@@ -8,6 +8,9 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   applyKeybaseContainerConfig,
+  buildKeybaseCommandEnv,
+  buildSpawnEnv,
+  findLingeringKeybasePids,
   prepareKeybaseContainer,
   resolveKeybaseContainerConfig,
   runKeybaseContainerEntrypoint,
@@ -95,6 +98,48 @@ describe("resolveKeybaseContainerConfig", () => {
       tmpDir: "/srv/openclaw-tmp",
       username: "claw_ll",
     });
+  });
+});
+
+describe("paper-key env hygiene", () => {
+  const resolved = { tmpDir: "/tmp/openclaw-keybase" } as const;
+
+  it("buildSpawnEnv strips KEYBASE_PAPERKEY and KEYBASE_PAPERKEY_FILE", () => {
+    const baseEnv = {
+      ...process.env,
+      KEYBASE_PAPERKEY: "secret",
+      KEYBASE_PAPERKEY_FILE: "/tmp/p",
+    };
+    const before = process.env.KEYBASE_PAPERKEY;
+    const beforeFile = process.env.KEYBASE_PAPERKEY_FILE;
+
+    const next = buildSpawnEnv(resolved, baseEnv);
+
+    expect(next.KEYBASE_PAPERKEY).toBeUndefined();
+    expect(next.KEYBASE_PAPERKEY_FILE).toBeUndefined();
+    expect("KEYBASE_PAPERKEY" in next).toBe(false);
+    expect("KEYBASE_PAPERKEY_FILE" in next).toBe(false);
+    expect(process.env.KEYBASE_PAPERKEY).toBe(before);
+    expect(process.env.KEYBASE_PAPERKEY_FILE).toBe(beforeFile);
+  });
+
+  it("buildKeybaseCommandEnv strips KEYBASE_PAPERKEY and KEYBASE_PAPERKEY_FILE", () => {
+    const baseEnv = {
+      ...process.env,
+      KEYBASE_PAPERKEY: "secret",
+      KEYBASE_PAPERKEY_FILE: "/tmp/p",
+    };
+    const before = process.env.KEYBASE_PAPERKEY;
+    const beforeFile = process.env.KEYBASE_PAPERKEY_FILE;
+
+    const next = buildKeybaseCommandEnv(resolved, baseEnv);
+
+    expect(next.KEYBASE_PAPERKEY).toBeUndefined();
+    expect(next.KEYBASE_PAPERKEY_FILE).toBeUndefined();
+    expect("KEYBASE_PAPERKEY" in next).toBe(false);
+    expect("KEYBASE_PAPERKEY_FILE" in next).toBe(false);
+    expect(process.env.KEYBASE_PAPERKEY).toBe(before);
+    expect(process.env.KEYBASE_PAPERKEY_FILE).toBe(beforeFile);
   });
 });
 
@@ -306,6 +351,316 @@ describe("prepareKeybaseContainer", () => {
     );
 
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("startKeybaseService", () => {
+  it("awaits child exit between startKeybaseService retries", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "keybase-container-entrypoint-"));
+    cleanups.push(async () => {
+      await rm(rootDir, { recursive: true, force: true });
+    });
+    const paperKeyPath = path.join(rootDir, "paper-key.txt");
+    await writeFile(paperKeyPath, "test paper key\n", "utf8");
+
+    const events: string[] = [];
+    const serviceChildren: ReturnType<typeof createMockChildProcess>[] = [];
+
+    const spawnMock = vi.fn((_command: string, args: string[]) => {
+      const child = createMockChildProcess();
+      if (args.includes("service")) {
+        const idx = serviceChildren.length;
+        serviceChildren.push(child);
+        events.push(`spawn:${idx}`);
+        // kill() does not emit close synchronously — schedules it 25ms later.
+        // awaitChildExit must await that close before the loop respawns.
+        child.kill = ((signal?: string) => {
+          events.push(`kill:${idx}:${signal ?? "default"}`);
+          child.killed = true;
+          setTimeout(() => {
+            events.push(`close:${idx}`);
+            child.exitCode = 0;
+            child.emit("close", 0, null);
+          }, 25);
+          return true;
+        }) as MockChildProcess["kill"];
+        // earlyExitError on the first stat poll so the catch path runs fast.
+        void Promise.resolve().then(() => {
+          child.stderr.emit("data", "boom\n");
+          child.emit("exit", 1, null);
+        });
+      }
+      return child;
+    });
+
+    const sleep = vi.fn(async () => undefined);
+    const stat = vi.fn().mockRejectedValue(new Error("socket missing"));
+
+    await expect(
+      prepareKeybaseContainer(
+        {
+          autoOneshot: true,
+          binary: "keybase",
+          configPath: path.join(rootDir, "openclaw.json"),
+          homeDir: path.join(rootDir, "keybase-home"),
+          paperKeyFile: paperKeyPath,
+          pidFile: path.join(rootDir, "runtime", "keybased.pid"),
+          runtimeDir: path.join(rootDir, "runtime"),
+          socketFile: path.join(rootDir, "runtime", "keybased.sock"),
+          tmpDir: path.join(rootDir, "openclaw-tmp"),
+          username: "claw_ll",
+        },
+        {
+          readdir: vi.fn(async () => []),
+          sleep,
+          spawn: spawnMock as never,
+          stat,
+        },
+      ),
+    ).rejects.toThrow();
+
+    expect(serviceChildren.length).toBe(5);
+    // Every retry must close before the next spawn.
+    for (let i = 0; i < 4; i++) {
+      const closeIdx = events.indexOf(`close:${i}`);
+      const nextSpawnIdx = events.indexOf(`spawn:${i + 1}`);
+      expect(closeIdx).toBeGreaterThanOrEqual(0);
+      expect(nextSpawnIdx).toBeGreaterThan(closeIdx);
+    }
+  });
+
+  it("caps startKeybaseService at 5 attempts", async () => {
+    vi.useFakeTimers();
+    try {
+      const rootDir = await mkdtemp(path.join(os.tmpdir(), "keybase-container-entrypoint-"));
+      cleanups.push(async () => {
+        await rm(rootDir, { recursive: true, force: true });
+      });
+      const paperKeyPath = path.join(rootDir, "paper-key.txt");
+      await writeFile(paperKeyPath, "test paper key\n", "utf8");
+
+      let serviceSpawns = 0;
+      const spawnMock = vi.fn((_command: string, args: string[]) => {
+        const child = createMockChildProcess();
+        if (args.includes("service")) {
+          serviceSpawns += 1;
+          // Service child immediately exits with the "already running" stderr.
+          // Set exitCode so awaitChildExit fast-paths instead of waiting 5s.
+          void Promise.resolve().then(() => {
+            child.stderr.emit("data", "server already running\n");
+            child.exitCode = 1;
+            child.emit("exit", 1, null);
+          });
+        } else {
+          // runKeybaseCommand probe child — exits non-zero so the call rejects.
+          void Promise.resolve().then(() => {
+            child.stderr.emit("data", "Login required\n");
+            child.exitCode = 1;
+            child.emit("exit", 1, null);
+          });
+        }
+        return child;
+      });
+
+      const sleep = vi.fn(async (ms: number) => {
+        vi.advanceTimersByTime(ms);
+      });
+      // Pretend the keybase socket exists so waitForKeybaseSocket returns.
+      const stat = vi.fn().mockResolvedValue({});
+
+      const promise = prepareKeybaseContainer(
+        {
+          autoOneshot: true,
+          binary: "keybase",
+          configPath: path.join(rootDir, "openclaw.json"),
+          homeDir: path.join(rootDir, "keybase-home"),
+          paperKeyFile: paperKeyPath,
+          pidFile: path.join(rootDir, "runtime", "keybased.pid"),
+          runtimeDir: path.join(rootDir, "runtime"),
+          socketFile: path.join(rootDir, "runtime", "keybased.sock"),
+          tmpDir: path.join(rootDir, "openclaw-tmp"),
+          username: "claw_ll",
+        },
+        {
+          readdir: vi.fn(async () => []),
+          sleep,
+          spawn: spawnMock as never,
+          stat,
+        },
+      ).catch((error: unknown) => error);
+
+      await vi.runAllTimersAsync();
+      const result = await promise;
+
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).toMatch(/Keybase service did not become ready/);
+      expect(serviceSpawns).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("findLingeringKeybasePids (H-8)", () => {
+  type FakeProcEntry = {
+    ppid: number;
+    exe?: string;
+    cmdline?: string;
+    environ?: string;
+  };
+
+  function procFs(pids: Record<number, FakeProcEntry>) {
+    const numericKeys = () => Object.keys(pids).filter((k) => /^\d+$/.test(k));
+    return {
+      readdir: vi.fn(async (p: string) => {
+        if (p === "/proc") {
+          return numericKeys();
+        }
+        return [];
+      }),
+      readFile: vi.fn(async (p: string, _enc?: BufferEncoding) => {
+        const m = /^\/proc\/(\d+)\/(stat|cmdline|environ)$/.exec(p);
+        if (!m) {
+          const err: NodeJS.ErrnoException = new Error("ENOENT");
+          err.code = "ENOENT";
+          throw err;
+        }
+        const entry = pids[Number(m[1])];
+        if (!entry) {
+          const err: NodeJS.ErrnoException = new Error("ENOENT");
+          err.code = "ENOENT";
+          throw err;
+        }
+        if (m[2] === "cmdline") {
+          return entry.cmdline ?? "";
+        }
+        if (m[2] === "environ") {
+          return entry.environ ?? "";
+        }
+        // stat: pid (comm) S ppid pgrp ...
+        return `${m[1]} (node) S ${entry.ppid} 0 0 0 0 0`;
+      }),
+      readlink: vi.fn(async (p: string) => {
+        const m = /^\/proc\/(\d+)\/exe$/.exec(p);
+        if (!m) {
+          const err: NodeJS.ErrnoException = new Error("ENOENT");
+          err.code = "ENOENT";
+          throw err;
+        }
+        const entry = pids[Number(m[1])];
+        if (!entry?.exe) {
+          const err: NodeJS.ErrnoException = new Error("ENOENT");
+          err.code = "ENOENT";
+          throw err;
+        }
+        return entry.exe;
+      }),
+    };
+  }
+
+  function spyPid(pid: number) {
+    const spy = vi.spyOn(process, "pid", "get").mockReturnValue(pid);
+    cleanups.push(async () => {
+      spy.mockRestore();
+    });
+  }
+
+  it("skips processes outside the descendant chain", async () => {
+    spyPid(100);
+    const fs = procFs({
+      100: { ppid: 0, exe: process.execPath },
+      200: {
+        ppid: 100,
+        exe: "/usr/bin/keybase",
+        cmdline: "/usr/bin/keybase\0service\0",
+        environ: "KEYBASE_HOME=/home/node\0OTHER=1\0",
+      },
+      300: {
+        ppid: 1,
+        exe: "/usr/bin/keybase",
+        cmdline: "/usr/bin/keybase\0chat\0",
+        environ: "KEYBASE_HOME=/home/node\0",
+      },
+    });
+
+    const pids = await findLingeringKeybasePids("/usr/bin/keybase", "/home/node", fs as never);
+    expect(pids).toEqual([200]);
+  });
+
+  it("skips processes whose exe does not match resolved binary", async () => {
+    spyPid(100);
+    const fs = procFs({
+      100: { ppid: 0 },
+      200: {
+        ppid: 100,
+        exe: "/usr/bin/cat",
+        cmdline: "cat\0keybase\0",
+        environ: "KEYBASE_HOME=/home/node\0",
+      },
+    });
+
+    const pids = await findLingeringKeybasePids("/usr/bin/keybase", "/home/node", fs as never);
+    expect(pids).toEqual([]);
+  });
+
+  it("skips processes without matching KEYBASE_HOME env", async () => {
+    spyPid(100);
+    const fs = procFs({
+      100: { ppid: 0 },
+      200: {
+        ppid: 100,
+        exe: "/usr/bin/keybase",
+        cmdline: "/usr/bin/keybase\0",
+        environ: "FOO=bar\0",
+      },
+    });
+
+    const pids = await findLingeringKeybasePids("/usr/bin/keybase", "/home/node", fs as never);
+    expect(pids).toEqual([]);
+  });
+
+  it("skips when readlink throws (default-deny)", async () => {
+    spyPid(100);
+    const fs = procFs({
+      100: { ppid: 0 },
+      200: {
+        ppid: 100,
+        cmdline: "/usr/bin/keybase\0",
+        environ: "KEYBASE_HOME=/home/node\0",
+      },
+    });
+    fs.readlink = vi.fn(async (p: string) => {
+      const m = /^\/proc\/(\d+)\/exe$/.exec(p);
+      if (m && m[1] === "200") {
+        const err: NodeJS.ErrnoException = new Error("EACCES");
+        err.code = "EACCES";
+        throw err;
+      }
+      const err: NodeJS.ErrnoException = new Error("ENOENT");
+      err.code = "ENOENT";
+      throw err;
+    });
+
+    const pids = await findLingeringKeybasePids("/usr/bin/keybase", "/home/node", fs as never);
+    expect(pids).toEqual([]);
+  });
+
+  it("returns [] when running as PID 1 with non-matching /proc/1/exe", async () => {
+    spyPid(1);
+    const fs = procFs({
+      1: { ppid: 0, exe: "/sbin/init" },
+      200: {
+        ppid: 1,
+        exe: "/usr/bin/keybase",
+        cmdline: "/usr/bin/keybase\0",
+        environ: "KEYBASE_HOME=/home/node\0",
+      },
+    });
+
+    const pids = await findLingeringKeybasePids("/usr/bin/keybase", "/home/node", fs as never);
+    expect(pids).toEqual([]);
+    // readdir must not have been consulted because the guard short-circuits.
+    expect(fs.readdir).not.toHaveBeenCalled();
   });
 });
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { msTeamsApprovalAuth } from "./approval-auth.js";
 
 describe("msTeamsApprovalAuth", () => {
-  it("authorizes stable Teams user ids and ignores display-name allowlists", () => {
+  it("authorizes stable Teams user ids and rejects display-name allowlists (H-2)", () => {
     expect(
       msTeamsApprovalAuth.authorizeActorAction({
         cfg: {
@@ -18,15 +18,15 @@ describe("msTeamsApprovalAuth", () => {
       }),
     ).toEqual({ authorized: true });
 
-    expect(
-      msTeamsApprovalAuth.authorizeActorAction({
-        cfg: {
-          channels: { msteams: { allowFrom: ["Owner Display"] } },
-        },
-        senderId: "attacker-aad",
-        action: "approve",
-        approvalKind: "exec",
-      }),
-    ).toEqual({ authorized: true });
+    const filtered = msTeamsApprovalAuth.authorizeActorAction({
+      cfg: {
+        channels: { msteams: { allowFrom: ["Owner Display"] } },
+      },
+      senderId: "attacker-aad",
+      action: "approve",
+      approvalKind: "exec",
+    });
+    expect(filtered.authorized).toBe(false);
+    expect(filtered.reason).toMatch(/No approvers configured/);
   });
 });

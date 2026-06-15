@@ -37,6 +37,10 @@ function normalizeKeybaseImplicitTeamGroupKey(raw: string): string | undefined {
     : undefined;
 }
 
+export function isKeybaseImplicitTeamGroupKey(raw: string): boolean {
+  return normalizeKeybaseImplicitTeamGroupKey(raw) !== undefined;
+}
+
 function normalizeKeybaseImplicitTeamChannelName(name: string): string | undefined {
   return normalizeKeybaseImplicitTeamGroupKey(`${KEYBASE_IMPLICIT_TEAM_GROUP_PREFIX}${name}`);
 }
@@ -149,8 +153,13 @@ export function normalizeKeybaseTarget(raw: string): string | undefined {
 }
 
 export function normalizeKeybaseGroupKey(raw: string): string | undefined {
-  if (raw.trim() === "*") {
+  const trimmed = raw.trim();
+  if (trimmed === "*") {
     return "*";
+  }
+  if (/^conv:/i.test(trimmed)) {
+    const convId = trimmed.replace(/^conv:/i, "").trim();
+    return convId ? `conv:${convId}` : undefined;
   }
   const implicitTeamKey = normalizeKeybaseImplicitTeamGroupKey(raw);
   if (implicitTeamKey) {
@@ -225,15 +234,38 @@ export function buildKeybaseInboundGroupId(params: {
     name: string;
     topicName?: string;
   };
+  conversationId?: string;
 }): string | undefined {
   if (!params.channel.name) {
     return undefined;
   }
   if (params.channel.membersType?.toLowerCase() !== "team" && !params.channel.topicName) {
-    return normalizeKeybaseImplicitTeamChannelName(params.channel.name);
+    const aliasKey = normalizeKeybaseImplicitTeamChannelName(params.channel.name);
+    if (!aliasKey) {
+      return undefined;
+    }
+    return buildKeybaseConversationGroupKey(params.conversationId) ?? aliasKey;
   }
   const topicName =
     params.channel.topicName ??
     (params.channel.membersType?.toLowerCase() === "team" ? DEFAULT_KEYBASE_TEAM_TOPIC : "");
   return buildKeybaseGroupTarget(params.channel.name, topicName) ?? undefined;
+}
+
+export function buildKeybaseImplicitTeamAliasGroupKey(
+  channelName: string | undefined | null,
+): string | undefined {
+  if (!channelName) {
+    return undefined;
+  }
+  return normalizeKeybaseImplicitTeamChannelName(channelName);
+}
+
+function buildKeybaseConversationGroupKey(conversationId: string | undefined): string | undefined {
+  const trimmed = conversationId?.trim();
+  return trimmed ? `conv:${trimmed}` : undefined;
+}
+
+export function isKeybaseConversationGroupKey(raw: string): boolean {
+  return /^conv:/i.test(raw.trim());
 }

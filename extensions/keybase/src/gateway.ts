@@ -48,6 +48,7 @@ import {
   syncKeybaseCommandAdvertisements,
 } from "./runtime.js";
 import {
+  buildKeybaseImplicitTeamAliasGroupKey,
   buildKeybaseInboundGroupId,
   inferKeybaseInboundChatType,
   normalizeKeybaseGroupKey,
@@ -417,15 +418,26 @@ async function handleGroupMessage(params: {
 
   const rawBody = message.content.text?.body ?? "";
   const replyTarget = buildConversationReplyTarget(message.conversationId);
+  const isImplicitTeamChat =
+    message.channel.membersType?.toLowerCase() !== "team" && !message.channel.topicName;
   const groupId =
-    normalizeKeybaseGroupKey(buildKeybaseInboundGroupId({ channel: message.channel }) ?? "") ??
-    undefined;
+    normalizeKeybaseGroupKey(
+      buildKeybaseInboundGroupId({
+        channel: message.channel,
+        conversationId: message.conversationId,
+      }) ?? "",
+    ) ?? undefined;
   if (!groupId) {
     params.ctx.log?.debug?.(
       `[${params.account.accountId}] dropping Keybase group message without team/topic route`,
     );
     return;
   }
+  const aliasGroupIds = isImplicitTeamChat
+    ? [buildKeybaseImplicitTeamAliasGroupKey(message.channel.name)].filter((id): id is string =>
+        Boolean(id),
+      )
+    : [];
 
   const { groupPolicy } = resolveOpenProviderRuntimeGroupPolicy({
     providerConfigPresent: params.ctx.cfg.channels?.keybase !== undefined,
@@ -435,10 +447,13 @@ async function handleGroupMessage(params: {
   const groupMatch = resolveKeybaseGroupMatch({
     groups: params.account.groups,
     groupId,
+    aliasGroupIds,
+    isImplicitTeam: isImplicitTeamChat,
   });
   const groupAccess = resolveKeybaseGroupAccess({
     groupPolicy,
     groupMatch,
+    multiPartyDmPolicy: params.account.multiPartyDmPolicy,
   });
   if (!groupAccess.allowed) {
     params.ctx.log?.debug?.(
@@ -447,7 +462,11 @@ async function handleGroupMessage(params: {
     return;
   }
 
-  const groupAllowFrom = resolveKeybaseGroupAllowFrom(groupMatch);
+  const groupAllowFrom = resolveKeybaseGroupAllowFrom({
+    ...groupMatch,
+    isImplicitTeam: groupMatch.isImplicitTeam,
+    fallbackAllowFrom: params.account.allowFrom,
+  });
   if (
     groupAllowFrom.length > 0 &&
     !isNormalizedSenderAllowed({

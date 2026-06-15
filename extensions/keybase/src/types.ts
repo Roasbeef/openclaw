@@ -34,6 +34,7 @@ export interface ResolvedKeybaseAccount {
   enabled: boolean;
   groupPolicy: "open" | "allowlist" | "disabled";
   groups: Record<string, ResolvedKeybaseGroupConfig>;
+  multiPartyDmPolicy: "allow" | "deny";
   homeDir?: string;
   name?: string;
   paperKey?: string;

@@ -42,6 +42,77 @@ describe("Keybase group policy helpers", () => {
     });
   });
 
+  it("default-denies impteam groups when no allowlist matches", () => {
+    const match = resolveKeybaseGroupMatch({
+      groups: { "*": { allowFrom: [] } },
+      groupId: "conv:abc123",
+      aliasGroupIds: ["impteam:alice,bob,carol"],
+      isImplicitTeam: true,
+    });
+
+    expect(match.isImplicitTeam).toBe(true);
+    expect(
+      resolveKeybaseGroupAccess({
+        groupPolicy: "open",
+        groupMatch: match,
+      }),
+    ).toEqual({
+      allowed: false,
+      groupPolicy: "open",
+      reason: "route_not_allowlisted",
+    });
+  });
+
+  it("admits impteam groups when multiPartyDmPolicy=allow under groupPolicy=open", () => {
+    const match = resolveKeybaseGroupMatch({
+      groups: {},
+      groupId: "conv:abc123",
+      aliasGroupIds: ["impteam:alice,bob,carol"],
+      isImplicitTeam: true,
+    });
+
+    expect(
+      resolveKeybaseGroupAccess({
+        groupPolicy: "open",
+        groupMatch: match,
+        multiPartyDmPolicy: "allow",
+      }).allowed,
+    ).toBe(true);
+  });
+
+  it("matches impteam configs against alias keys when primary id is conv:<id>", () => {
+    const match = resolveKeybaseGroupMatch({
+      groups: {
+        "impteam:*": { allowFrom: ["alice"] },
+      },
+      groupId: "conv:abc123",
+      aliasGroupIds: ["impteam:alice,bob,carol"],
+      isImplicitTeam: true,
+    });
+
+    expect(match.allowed).toBe(true);
+    expect(match.wildcardConfig?.allowFrom).toEqual(["alice"]);
+    expect(resolveKeybaseGroupAllowFrom(match)).toEqual(["alice"]);
+  });
+
+  it("forces requireMention=true for impteam groups regardless of config", () => {
+    expect(
+      resolveKeybaseGroupRequireMention({
+        groupConfig: { allowFrom: [], requireMention: false },
+        isImplicitTeam: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("falls back to account allowFrom for impteam groups when no group/wildcard allowFrom is set", () => {
+    expect(
+      resolveKeybaseGroupAllowFrom({
+        isImplicitTeam: true,
+        fallbackAllowFrom: ["alice", "bob"],
+      }),
+    ).toEqual(["alice", "bob"]);
+  });
+
   it("prefers direct group overrides over wildcard defaults", () => {
     const match = resolveKeybaseGroupMatch({
       groups: {

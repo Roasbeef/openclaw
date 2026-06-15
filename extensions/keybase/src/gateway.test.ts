@@ -60,6 +60,7 @@ function buildAccount(overrides: Partial<ResolvedKeybaseAccount> = {}): Resolved
     enabled: true,
     groupPolicy: "allowlist",
     groups: {},
+    multiPartyDmPolicy: "deny",
     homeDir: undefined,
     name: undefined,
     paperKey: undefined,

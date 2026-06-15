@@ -1,4 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -45,6 +47,7 @@ type RuntimeDeps = {
   listSkillCommandsForAgents: typeof listSkillCommandsForAgents;
   oneshot: typeof keybaseOneshot;
   readFile: typeof readFile;
+  realpath: typeof realpath;
   resolveNativeCommandsEnabled: typeof resolveNativeCommandsEnabled;
   resolveNativeSkillsEnabled: typeof resolveNativeSkillsEnabled;
 };
@@ -58,20 +61,25 @@ const defaultRuntimeDeps: RuntimeDeps = {
   listSkillCommandsForAgents,
   oneshot: keybaseOneshot,
   readFile,
+  realpath,
   resolveNativeCommandsEnabled,
   resolveNativeSkillsEnabled,
 };
 
 const preparedAccounts = new Map<string, Promise<void>>();
 
-function buildPreparedAccountKey(account: ResolvedKeybaseAccount): string {
+function hashSecretForKey(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+export function buildPreparedAccountKey(account: ResolvedKeybaseAccount): string {
   return [
     account.binary,
     account.homeDir ?? "",
     account.socketFile ?? "",
     account.pidFile ?? "",
     account.username ?? "",
-    account.paperKey ?? "",
+    account.paperKey ? hashSecretForKey(account.paperKey) : "",
     account.paperKeyFile ?? "",
     account.enableTyping ? "typing:1" : "typing:0",
   ].join("\u0000");
@@ -412,15 +420,111 @@ export async function deleteKeybaseMessage(params: {
   );
 }
 
-function resolveLocalMediaPath(mediaUrl: string): string | null {
-  if (mediaUrl.startsWith("file://")) {
-    try {
-      return fileURLToPath(mediaUrl);
-    } catch {
+// Default-deny prefixes for resolved media paths. Even if an operator has
+// opted into local-file attachments via OPENCLAW_KEYBASE_MEDIA_ALLOW_DIRS,
+// we refuse anything under these roots because they routinely contain
+// credentials, secrets, or kernel state the bot should never exfiltrate.
+const KEYBASE_MEDIA_DENY_PREFIXES = [
+  "/etc",
+  "/proc",
+  "/sys",
+  "/root",
+  "/boot",
+  "/dev",
+  "/var/run/secrets",
+  "/run/secrets",
+  "/vault",
+];
+
+// Path basenames that are always forbidden anywhere in the resolved path.
+// Catches dotdirs that hold secrets even when nested under an allow-listed
+// root (e.g. /shared/.ssh/id_rsa).
+const KEYBASE_MEDIA_DENY_PATH_SEGMENTS = new Set([
+  ".ssh",
+  ".keybase",
+  ".gnupg",
+  ".aws",
+  ".docker",
+  ".kube",
+  ".openclaw",
+  ".git-credentials",
+  ".npmrc",
+  ".pypirc",
+]);
+
+function resolveKeybaseMediaAllowDirs(): string[] {
+  const raw = process.env.OPENCLAW_KEYBASE_MEDIA_ALLOW_DIRS ?? "";
+  return raw
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0 && path.isAbsolute(entry))
+    .map((entry) => path.resolve(entry));
+}
+
+async function resolveLocalMediaPath(
+  mediaUrl: string,
+  deps: Pick<RuntimeDeps, "realpath">,
+): Promise<string | null> {
+  // Only accept file:// URLs. Bare absolute paths (the easiest vector for an
+  // LLM-generated tool call to exfiltrate /etc/shadow or ~/.openclaw/openclaw.json)
+  // are rejected outright.
+  if (!mediaUrl.startsWith("file://")) {
+    return null;
+  }
+
+  let candidate: string;
+  try {
+    candidate = fileURLToPath(mediaUrl);
+  } catch {
+    return null;
+  }
+  if (!path.isAbsolute(candidate)) {
+    return null;
+  }
+
+  // Resolve symlinks so that an attacker can't smuggle a denylisted path
+  // through a benign-looking symlink under an allow-listed root.
+  let resolved: string;
+  try {
+    resolved = await deps.realpath(candidate);
+  } catch {
+    return null;
+  }
+
+  const segments = resolved.split(path.sep);
+  for (const seg of segments) {
+    if (KEYBASE_MEDIA_DENY_PATH_SEGMENTS.has(seg)) {
       return null;
     }
   }
-  return path.isAbsolute(mediaUrl) ? mediaUrl : null;
+
+  for (const prefix of KEYBASE_MEDIA_DENY_PREFIXES) {
+    if (resolved === prefix || resolved.startsWith(`${prefix}${path.sep}`)) {
+      return null;
+    }
+  }
+
+  // Refuse anything under the bot's home directory by default — that's where
+  // openclaw.json (paper key, tokens), .ssh, .keybase live.
+  const home = os.homedir();
+  if (home && (resolved === home || resolved.startsWith(`${home}${path.sep}`))) {
+    return null;
+  }
+
+  // Default deny unless the operator opted into one or more allow-listed
+  // roots via OPENCLAW_KEYBASE_MEDIA_ALLOW_DIRS.
+  const allowDirs = resolveKeybaseMediaAllowDirs();
+  if (allowDirs.length === 0) {
+    return null;
+  }
+  const inAllowedRoot = allowDirs.some(
+    (root) => resolved === root || resolved.startsWith(`${root}${path.sep}`),
+  );
+  if (!inAllowedRoot) {
+    return null;
+  }
+
+  return resolved;
 }
 
 export async function sendKeybaseMedia(params: {
@@ -436,7 +540,8 @@ export async function sendKeybaseMedia(params: {
     return await sendKeybaseText(params);
   }
 
-  const localPath = resolveLocalMediaPath(mediaUrl);
+  const runtimeDeps = { ...defaultRuntimeDeps, ...params.deps };
+  const localPath = await resolveLocalMediaPath(mediaUrl, runtimeDeps);
   if (!localPath) {
     const combinedText = params.text
       ? `${params.text}\n\nAttachment: ${mediaUrl}`
@@ -448,7 +553,6 @@ export async function sendKeybaseMedia(params: {
   if (!conversationRef) {
     throw new Error(`Invalid Keybase target: ${params.to}`);
   }
-  const runtimeDeps = { ...defaultRuntimeDeps, ...params.deps };
   await ensureKeybaseAccountPrepared(params.account, runtimeDeps);
 
   let lastMessageId = "";

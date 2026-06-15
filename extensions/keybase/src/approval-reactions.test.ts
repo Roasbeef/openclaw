@@ -97,6 +97,63 @@ describe("keybase approval reactions", () => {
     ).toBeNull();
   });
 
+  it("does not let an impteam alias hijack a conv-bound approval", () => {
+    registerKeybaseApprovalReactionTarget({
+      accountId: "ops",
+      targetKey: "conv:original-conv",
+      messageId: "42",
+      approvalId: "req-original",
+      allowedDecisions: ["allow-once", "deny"],
+    });
+
+    expect(
+      resolveKeybaseApprovalReactionTarget({
+        accountId: "ops",
+        targetKeys: ["conv:other-conv", "impteam:alice,bob,carol"],
+        messageId: "42",
+        reactionBody: ":white_check_mark:",
+      }),
+    ).toBeNull();
+  });
+
+  it("ignores impteam alias candidates when a conv: candidate is also present", () => {
+    registerKeybaseApprovalReactionTarget({
+      accountId: "ops",
+      targetKey: "impteam:alice,bob,carol",
+      messageId: "42",
+      approvalId: "req-legacy",
+      allowedDecisions: ["allow-once", "deny"],
+    });
+
+    expect(
+      resolveKeybaseApprovalReactionTarget({
+        accountId: "ops",
+        targetKeys: ["conv:new-conv", "impteam:alice,bob,carol"],
+        messageId: "42",
+        reactionBody: ":white_check_mark:",
+      }),
+    ).toBeNull();
+  });
+
+  it("falls back to impteam alias only when no conv: candidate is supplied", () => {
+    registerKeybaseApprovalReactionTarget({
+      accountId: "ops",
+      targetKey: "impteam:alice,bob,carol",
+      messageId: "42",
+      approvalId: "req-legacy",
+      allowedDecisions: ["allow-once", "deny"],
+    });
+
+    expect(
+      resolveKeybaseApprovalReactionTarget({
+        accountId: "ops",
+        targetKeys: ["impteam:alice,bob,carol"],
+        messageId: "42",
+        reactionBody: ":white_check_mark:",
+      }),
+    ).toMatchObject({ approvalId: "req-legacy", decision: "allow-once" });
+  });
+
   it("stops resolving reactions after the approval message is unregistered", () => {
     registerKeybaseApprovalReactionTarget({
       targetKey: "conv:abc",

@@ -107,6 +107,27 @@ describe("Keybase target parsing", () => {
     );
   });
 
+  it("prefers conv:<id> over impteam alias when conversationId is known", () => {
+    expect(
+      buildKeybaseInboundGroupId({
+        channel: {
+          membersType: "impteamnative",
+          name: "third,openclaw,sender",
+        },
+        conversationId: "0001abcd",
+      }),
+    ).toBe("conv:0001abcd");
+    expect(
+      buildKeybaseInboundGroupId({
+        channel: {
+          membersType: "impteamnative",
+          name: "third,openclaw,sender",
+        },
+      }),
+    ).toBe("impteam:openclaw,sender,third");
+    expect(normalizeKeybaseGroupKey("conv:Foo123")).toBe("conv:Foo123");
+  });
+
   it("canonicalizes group routing keys separately from outbound targets", () => {
     expect(buildKeybaseGroupTarget("LightningLabs", "Ops")).toBe("team:LightningLabs#Ops");
     expect(normalizeKeybaseGroupKey("team:LightningLabs#Ops")).toBe("team:lightninglabs#ops");

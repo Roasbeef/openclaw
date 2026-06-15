@@ -1,7 +1,12 @@
 import { EventEmitter } from "node:events";
+import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
+  KEYBASE_API_LISTEN_MAX_RESTART_ATTEMPTS,
+  KEYBASE_READLINE_MAX_LINE_LENGTH,
+  KEYBASE_STDERR_RING_BYTES,
+  appendKeybaseStderr,
   buildKeybaseApiListenArgs,
   buildKeybaseOneshotArgs,
   buildKeybaseNotificationSettingsArgs,
@@ -10,6 +15,14 @@ import {
   startKeybaseApiListen,
 } from "./client.js";
 import { buildKeybaseSendRequest, buildKeybaseTeamChannel } from "./protocol.js";
+
+vi.mock("node:readline", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:readline")>();
+  return {
+    ...actual,
+    createInterface: vi.fn(actual.createInterface),
+  };
+});
 
 class MockListenChild extends EventEmitter {
   readonly stdout = new PassThrough();
@@ -233,6 +246,35 @@ describe("Keybase CLI transport", () => {
     expect(stdinChunks.join("")).toBe("paper key words\n");
   });
 
+  it("attaches oneshot error/close listeners before writing to stdin", async () => {
+    const child = new MockOneshotChild();
+    const onceSpy = vi.spyOn(child, "once");
+    const endSpy = vi.spyOn(child.stdin, "end");
+    const spawnCommand = vi.fn().mockReturnValue(child);
+    const runCommand = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+
+    await keybaseOneshot(
+      { paperKey: "paper key words", username: "lbottestbot" },
+      {
+        binary: "/usr/local/bin/keybase",
+        runCommand,
+        spawnCommand,
+      },
+    );
+
+    const errorIdx = onceSpy.mock.calls.findIndex(([event]) => event === "error");
+    const closeIdx = onceSpy.mock.calls.findIndex(([event]) => event === "close");
+    expect(errorIdx).toBeGreaterThanOrEqual(0);
+    expect(closeIdx).toBeGreaterThanOrEqual(0);
+
+    const errorOrder = onceSpy.mock.invocationCallOrder[errorIdx];
+    const closeOrder = onceSpy.mock.invocationCallOrder[closeIdx];
+    const endOrder = endSpy.mock.invocationCallOrder[0];
+    expect(endOrder).toBeDefined();
+    expect(errorOrder).toBeLessThan(endOrder);
+    expect(closeOrder).toBeLessThan(endOrder);
+  });
+
   it("retries api-listen when the keybase service socket is still booting", async () => {
     vi.useFakeTimers();
     try {
@@ -266,6 +308,7 @@ describe("Keybase CLI transport", () => {
 
   it("restarts api-listen after an unexpected post-startup exit", async () => {
     vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
     try {
       const firstChild = createListenChild();
       const secondChild = createListenChild();
@@ -291,6 +334,7 @@ describe("Keybase CLI transport", () => {
 
       handle.stop();
     } finally {
+      randomSpy.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -311,11 +355,171 @@ describe("Keybase CLI transport", () => {
 
       firstChild.emit("close", 1, null);
       handle.stop();
-      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(1_000);
 
       expect(spawnCommand).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("caps api-listen restart attempts at the default ceiling", async () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const children: MockListenChild[] = [];
+      const spawnCommand = vi.fn().mockImplementation(() => {
+        const child = new MockListenChild();
+        children.push(child);
+        return child;
+      });
+      const onExit = vi.fn();
+
+      const handle = startKeybaseApiListen({
+        onEvent: vi.fn(),
+        onExit,
+        restartDelayMs: 1,
+        restartOnExit: true,
+        spawnCommand,
+      });
+
+      const totalCloses = KEYBASE_API_LISTEN_MAX_RESTART_ATTEMPTS + 1;
+      for (let i = 0; i < totalCloses; i++) {
+        if (i > 0) {
+          // Fire the pending restart timer without advancing past the
+          // 30s uptime-reset threshold — each child must look short-lived.
+          await vi.runOnlyPendingTimersAsync();
+        }
+        const child = children[i];
+        expect(child).toBeDefined();
+        child.emit("close", 0, null);
+      }
+
+      // No further restart should be scheduled after the 101st close.
+      await vi.runOnlyPendingTimersAsync();
+
+      expect(spawnCommand).toHaveBeenCalledTimes(KEYBASE_API_LISTEN_MAX_RESTART_ATTEMPTS + 1);
+      expect(onExit).toHaveBeenCalledTimes(totalCloses);
+
+      handle.stop();
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("applies exponential backoff between restarts", async () => {
+    vi.useFakeTimers();
+    // jitter = 0.8 + 0.5 * 0.4 = 1.0 → delay equals currentRestartDelayMs.
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      const children: MockListenChild[] = [];
+      const spawnCommand = vi.fn().mockImplementation(() => {
+        const child = new MockListenChild();
+        children.push(child);
+        return child;
+      });
+
+      const handle = startKeybaseApiListen({
+        onEvent: vi.fn(),
+        restartDelayMs: 100,
+        restartOnExit: true,
+        spawnCommand,
+      });
+
+      const expectedDelays = [100, 200, 400];
+      for (const delay of expectedDelays) {
+        const child = children[children.length - 1];
+        const spawnsBefore = spawnCommand.mock.calls.length;
+        child.emit("close", 0, null);
+        // One ms short of the scheduled delay should not yet trigger spawn.
+        await vi.advanceTimersByTimeAsync(delay - 1);
+        expect(spawnCommand).toHaveBeenCalledTimes(spawnsBefore);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(spawnCommand).toHaveBeenCalledTimes(spawnsBefore + 1);
+      }
+
+      handle.stop();
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("resets restart attempts after a long-uptime child exits", async () => {
+    vi.useFakeTimers();
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const children: MockListenChild[] = [];
+      const spawnCommand = vi.fn().mockImplementation(() => {
+        const child = new MockListenChild();
+        children.push(child);
+        return child;
+      });
+
+      const handle = startKeybaseApiListen({
+        onEvent: vi.fn(),
+        restartDelayMs: 100,
+        restartMaxAttempts: 3,
+        restartOnExit: true,
+        spawnCommand,
+      });
+
+      // Burn through the budget with three short-lived closes.
+      for (let i = 0; i < 3; i++) {
+        if (i > 0) {
+          await vi.runOnlyPendingTimersAsync();
+        }
+        children[i].emit("close", 0, null);
+      }
+      // Spawn the fourth child without a long uptime first.
+      await vi.runOnlyPendingTimersAsync();
+      expect(spawnCommand).toHaveBeenCalledTimes(4);
+
+      // Fourth child stays alive past the uptime-reset threshold.
+      await vi.advanceTimersByTimeAsync(31_000);
+      children[3].emit("close", 0, null);
+      await vi.runOnlyPendingTimersAsync();
+
+      // Reset should have re-armed restart budget and produced a fifth spawn.
+      expect(spawnCommand).toHaveBeenCalledTimes(5);
+
+      handle.stop();
+    } finally {
+      randomSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("appendKeybaseStderr keeps only the last N bytes", () => {
+    expect(appendKeybaseStderr("", "hello", 16)).toBe("hello");
+    expect(appendKeybaseStderr("hello ", "world", 16)).toBe("hello world");
+    expect(appendKeybaseStderr("hello ", "world", 5)).toBe("world");
+    expect(appendKeybaseStderr("a".repeat(8), "b".repeat(8), 10)).toBe("aabbbbbbbb");
+    // Default ring size keeps tails of pathological input.
+    const massive = "x".repeat(KEYBASE_STDERR_RING_BYTES * 2);
+    const trimmed = appendKeybaseStderr("", massive);
+    expect(trimmed).toHaveLength(KEYBASE_STDERR_RING_BYTES);
+  });
+
+  it("bounds api-listen readline line length", () => {
+    vi.mocked(createInterface).mockClear();
+    const child = createListenChild();
+    const spawnCommand = vi.fn().mockReturnValueOnce(child);
+
+    const handle = startKeybaseApiListen({
+      onEvent: vi.fn(),
+      spawnCommand,
+    });
+
+    expect(createInterface).toHaveBeenCalledTimes(1);
+    expect(createInterface).toHaveBeenCalledWith(
+      expect.objectContaining({
+        crlfDelay: Infinity,
+        maxLineLength: KEYBASE_READLINE_MAX_LINE_LENGTH,
+      }),
+    );
+
+    handle.stop();
   });
 });
