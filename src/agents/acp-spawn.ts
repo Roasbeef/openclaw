@@ -20,10 +20,7 @@ import { isAcpEnabledByPolicy, resolveAcpAgentPolicyError } from "../acp/policy.
 import { readAcpSessionMeta } from "../acp/runtime/session-meta.js";
 import { DEFAULT_HEARTBEAT_EVERY } from "../auto-reply/heartbeat.js";
 import { formatThinkingLevels } from "../auto-reply/thinking.js";
-import {
-  resolveChannelDefaultBindingPlacement,
-  resolveInboundConversationResolution,
-} from "../channels/conversation-resolution.js";
+import { resolveInboundConversationResolution } from "../channels/conversation-resolution.js";
 import {
   formatConversationTarget,
   routeFromBindingRecord,
@@ -38,6 +35,7 @@ import {
   formatThreadBindingSpawnDisabledError,
   resolveThreadBindingIdleTimeoutMsForChannel,
   resolveThreadBindingMaxAgeMsForChannel,
+  resolveThreadBindingPlacementForCurrentContext,
   resolveThreadBindingSpawnPolicy,
 } from "../channels/thread-bindings-policy.js";
 import { parseDurationMs } from "../cli/parse-duration.js";
@@ -338,12 +336,6 @@ type AcpSpawnBootstrapDeliveryPlan = {
   to?: string;
   threadId?: string;
 };
-
-function resolvePlacementWithoutChannelPlugin(params: {
-  capabilities: { placements: Array<"current" | "child"> };
-}): "current" | "child" {
-  return params.capabilities.placements.includes("child") ? "child" : "current";
-}
 
 function resolveSpawnMode(params: {
   requestedMode?: SpawnAcpMode;
@@ -722,12 +714,20 @@ function prepareAcpThreadBinding(params: {
       error: `Thread bindings are unavailable for ${policy.channel}.`,
     };
   }
-  const pluginPlacement = resolveChannelDefaultBindingPlacement(policy.channel);
-  const placementToUse =
-    pluginPlacement ??
-    resolvePlacementWithoutChannelPlugin({
-      capabilities,
-    });
+  // When the inbound is already inside a thread (threadId set), bind to that
+  // thread (placement="current") instead of trying to nest a new child thread
+  // under it (which Discord can't do anyway). Mirrors what /acp spawn does via
+  // resolveThreadBindingPlacementForCurrentContext; an unconditional
+  // defaultTopLevelPlacement lookup ignores threadId and always returns "child"
+  // for Discord — producing thread_binding_invalid when the caller was already
+  // in a thread.
+  const placementToUse = resolveThreadBindingPlacementForCurrentContext({
+    channel: policy.channel,
+    threadId:
+      typeof params.threadId === "number"
+        ? String(params.threadId)
+        : (normalizeOptionalString(params.threadId) ?? undefined),
+  });
   if (!capabilities.bindSupported || !capabilities.placements.includes(placementToUse)) {
     return {
       ok: false,
