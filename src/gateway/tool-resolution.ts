@@ -50,6 +50,7 @@ export function resolveGatewayScopedTools(params: {
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
   agentTo?: string;
   agentThreadId?: string;
+  agentGroupId?: string;
   senderIsOwner?: boolean;
   allowGatewaySubagentBinding?: boolean;
   allowMediaInvokeCommands?: boolean;
@@ -164,6 +165,7 @@ export function resolveGatewayScopedTools(params: {
     sourceReplyDeliveryMode,
     agentTo: params.agentTo,
     agentThreadId: params.agentThreadId,
+    agentGroupId: params.agentGroupId,
     currentChannelId: params.currentChannelId ?? params.agentTo,
     currentThreadTs: params.currentThreadTs ?? params.agentThreadId,
     currentMessageId: params.currentMessageId,

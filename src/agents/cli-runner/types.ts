@@ -91,6 +91,12 @@ export type RunCliAgentParams = {
   currentMessageId?: string | number;
   currentInboundAudio?: boolean;
   agentAccountId?: string;
+  /** Inbound delivery target threaded to the loopback MCP client for ACP thread binding. */
+  messageTo?: string;
+  /** Inbound thread id threaded to the loopback MCP client for ACP thread binding. */
+  messageThreadId?: string | number;
+  /** Inbound group session id threaded to the loopback MCP client for ACP thread binding. */
+  messageGroupId?: string;
   /** Sender identity for channel-originated runs when available. */
   senderId?: string | null;
   /** Trusted sender identity bit for channel action auth. */

@@ -115,7 +115,7 @@ import {
 } from "./compaction-notice.js";
 import { resolveCurrentTurnImages } from "./current-turn-images.js";
 import { hasInboundAudio } from "./inbound-media.js";
-import { resolveOriginMessageProvider } from "./origin-routing.js";
+import { resolveOriginMessageProvider, resolveOriginMessageTo } from "./origin-routing.js";
 import {
   classifyProviderRequestError,
   PROVIDER_CONVERSATION_STATE_ERROR_USER_MESSAGE,
@@ -2233,6 +2233,15 @@ export async function runAgentTurnWithFallback(params: {
                     currentMessageId: cliCurrentMessageId,
                     currentInboundAudio: hasInboundAudio(params.sessionCtx),
                     agentAccountId: params.followupRun.run.agentAccountId,
+                    // Thread inbound delivery context through the MCP loopback so a
+                    // CLI-backed MCP client (claude -p) can sessions_spawn(thread: true)
+                    // with ACP thread binding intact.
+                    messageTo: resolveOriginMessageTo({
+                      originatingTo: params.sessionCtx.OriginatingTo,
+                      to: params.sessionCtx.To,
+                    }),
+                    messageThreadId: params.sessionCtx.MessageThreadId ?? undefined,
+                    messageGroupId: resolveGroupSessionKey(params.sessionCtx)?.id,
                     senderId: params.followupRun.run.senderId,
                     senderIsOwner: params.followupRun.run.senderIsOwner,
                     toolsAllow: params.opts?.toolsAllow,

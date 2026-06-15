@@ -297,6 +297,10 @@ export async function prepareCliRunContext(
           OPENCLAW_MCP_CURRENT_INBOUND_AUDIO: params.currentInboundAudio === true ? "true" : "",
           OPENCLAW_MCP_INBOUND_EVENT_KIND: params.currentInboundEventKind ?? "",
           OPENCLAW_MCP_SOURCE_REPLY_DELIVERY_MODE: params.sourceReplyDeliveryMode ?? "",
+          OPENCLAW_MCP_MESSAGE_TO: params.messageTo ?? "",
+          OPENCLAW_MCP_MESSAGE_THREAD_ID:
+            params.messageThreadId == null ? "" : String(params.messageThreadId),
+          OPENCLAW_MCP_MESSAGE_GROUP_ID: params.messageGroupId ?? "",
         }
       : undefined,
     warn: (message) => cliBackendLog.warn(message),
@@ -377,6 +381,9 @@ export async function prepareCliRunContext(
           inboundEventKind: params.currentInboundEventKind,
           sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
           senderIsOwner: params.senderIsOwner,
+          agentTo: params.messageTo,
+          agentThreadId: params.messageThreadId == null ? undefined : String(params.messageThreadId),
+          agentGroupId: params.messageGroupId,
         }).tools
       : [];
   const promptToolNamesHash =

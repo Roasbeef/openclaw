@@ -751,6 +751,9 @@ describe("mcp loopback server", () => {
       messageProvider: "telegram",
       sessionKey: "agent:main:telegram:group:chat123",
       sourceReplyDeliveryMode: "message_tool_only",
+      agentTo: undefined,
+      agentThreadId: undefined,
+      agentGroupId: undefined,
     } satisfies Omit<Parameters<McpLoopbackToolCache["resolve"]>[0], "senderIsOwner">;
     resolveGatewayScopedToolsMock.mockImplementation((input: unknown) => {
       const params = input as { senderIsOwner?: boolean };
@@ -791,6 +794,9 @@ describe("mcp loopback server", () => {
       senderIsOwner: true,
       sessionKey: "agent:main:telegram:group:chat123",
       sourceReplyDeliveryMode: "message_tool_only",
+      agentTo: undefined,
+      agentThreadId: undefined,
+      agentGroupId: undefined,
     } satisfies Parameters<McpLoopbackToolCache["resolve"]>[0];
 
     for (let index = 0; index < 257; index += 1) {

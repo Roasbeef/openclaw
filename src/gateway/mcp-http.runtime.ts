@@ -37,6 +37,9 @@ type McpLoopbackScopeParams = {
   inboundEventKind: InboundEventKind | undefined;
   sourceReplyDeliveryMode: SourceReplyDeliveryMode | undefined;
   senderIsOwner: boolean | undefined;
+  agentTo: string | undefined;
+  agentThreadId: string | undefined;
+  agentGroupId: string | undefined;
 };
 
 /** Resolves loopback-visible tools after applying gateway scope and native-tool exclusions. */
@@ -75,6 +78,11 @@ export class McpLoopbackToolCache {
         : params.senderIsOwner === false
           ? "non-owner"
           : "unknown-owner",
+      // Distinct ACP thread binding context must not share a cached tool scope:
+      // collapsing these into one key would let one thread's spawn bind to another's.
+      params.agentTo ?? "",
+      params.agentThreadId ?? "",
+      params.agentGroupId ?? "",
     ].join("\u0000");
     const now = Date.now();
     for (const [key, entry] of this.#entries) {
