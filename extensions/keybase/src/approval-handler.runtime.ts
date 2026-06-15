@@ -168,6 +168,17 @@ function normalizeReactionTargetRef(params: ReactionTargetRef): ReactionTargetRe
   return { targetKey, messageId };
 }
 
+function sliceByCodePointUtf16Limit(text: string, limit: number): string {
+  let output = "";
+  for (const char of text) {
+    if (output.length + char.length > limit) {
+      break;
+    }
+    output += char;
+  }
+  return output;
+}
+
 export function buildKeybaseApprovalPendingMessages(params: { limit?: number; text: string }): {
   detailText?: string;
   promptText: string;
@@ -184,7 +195,13 @@ export function buildKeybaseApprovalPendingMessages(params: { limit?: number; te
   }
 
   const headLimit = Math.max(1, limit - KEYBASE_APPROVAL_TRUNCATION_NOTICE.length);
-  const promptText = `${params.text.slice(0, headLimit).trimEnd()}${KEYBASE_APPROVAL_TRUNCATION_NOTICE}`;
+  // M-7(b): UTF-16 `.slice(headLimit)` can split a non-BMP emoji surrogate
+  // pair, producing a lone surrogate that breaks strict JSON parsers
+  // (Keybase server, downstream relays). Iterate code points, but keep the
+  // public limit measured in UTF-16 units because Keybase send bounds use
+  // JavaScript string lengths elsewhere in this plugin.
+  const headText = sliceByCodePointUtf16Limit(params.text, headLimit);
+  const promptText = `${headText.trimEnd()}${KEYBASE_APPROVAL_TRUNCATION_NOTICE}`;
   return {
     promptText,
     detailText: params.text,
@@ -247,7 +264,19 @@ export const keybaseApprovalNativeRuntime = createChannelApprovalNativeRuntimeAd
         to: preparedTarget.to,
         text: messages.promptText,
       });
-      await Promise.allSettled(
+      // M-1: register the reaction target as soon as we have the prompt
+      // messageId so an approver who reacts before bindPending fires (e.g.
+      // before reactions/detail-text chunks finish posting) is not silently
+      // dropped against an empty registry. bindPending remains the canonical
+      // path; calling register here is idempotent (same key in the Map).
+      registerKeybaseApprovalReactionTarget({
+        accountId,
+        targetKey: preparedTarget.targetKey,
+        messageId: result.messageId,
+        approvalId: pendingPayload.approvalId,
+        allowedDecisions: pendingPayload.allowedDecisions,
+      });
+      const reactionResults = await Promise.allSettled(
         listKeybaseApprovalReactionBindings(pendingPayload.allowedDecisions).map(
           async ({ reaction }) => {
             await sendKeybaseReaction({
@@ -259,6 +288,16 @@ export const keybaseApprovalNativeRuntime = createChannelApprovalNativeRuntimeAd
           },
         ),
       );
+      // M-3: keep allSettled (each reaction failure is independent) but
+      // surface rejections so a prompt that lands without any clickable
+      // emoji is observable in operator logs instead of vanishing.
+      for (const settled of reactionResults) {
+        if (settled.status === "rejected") {
+          console.warn(
+            `[keybase] approval reaction send failed approval=${pendingPayload.approvalId} target=${preparedTarget.targetKey} message=${result.messageId}: ${String(settled.reason)}`,
+          );
+        }
+      }
       if (messages.detailText) {
         await sendKeybaseTextChunks({
           account,

@@ -1,5 +1,4 @@
 import { EventEmitter } from "node:events";
-import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -15,14 +14,6 @@ import {
   startKeybaseApiListen,
 } from "./client.js";
 import { buildKeybaseSendRequest, buildKeybaseTeamChannel } from "./protocol.js";
-
-vi.mock("node:readline", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:readline")>();
-  return {
-    ...actual,
-    createInterface: vi.fn(actual.createInterface),
-  };
-});
 
 class MockListenChild extends EventEmitter {
   readonly stdout = new PassThrough();
@@ -176,7 +167,10 @@ describe("Keybase CLI transport", () => {
   it("runs oneshot with username on the command line and the paper key on stdin", async () => {
     const child = new MockOneshotChild();
     const spawnCommand = vi.fn().mockReturnValue(child);
-    const runCommand = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const runCommand = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("not ready"))
+      .mockResolvedValue({ stdout: "", stderr: "" });
     const stdinChunks: string[] = [];
     child.stdin.setEncoding("utf8");
     child.stdin.on("data", (chunk: string) => {
@@ -251,7 +245,10 @@ describe("Keybase CLI transport", () => {
     const onceSpy = vi.spyOn(child, "once");
     const endSpy = vi.spyOn(child.stdin, "end");
     const spawnCommand = vi.fn().mockReturnValue(child);
-    const runCommand = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const runCommand = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("not ready"))
+      .mockResolvedValue({ stdout: "", stderr: "" });
 
     await keybaseOneshot(
       { paperKey: "paper key words", username: "lbottestbot" },
@@ -273,6 +270,31 @@ describe("Keybase CLI transport", () => {
     expect(endOrder).toBeDefined();
     expect(errorOrder).toBeLessThan(endOrder);
     expect(closeOrder).toBeLessThan(endOrder);
+  });
+
+  it("skips oneshot when the Keybase service is already ready", async () => {
+    const spawnCommand = vi.fn();
+    const runCommand = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+
+    await expect(
+      keybaseOneshot(
+        { paperKey: "paper key words", username: "lbottestbot" },
+        {
+          binary: "/usr/local/bin/keybase",
+          runCommand,
+          spawnCommand,
+        },
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(spawnCommand).not.toHaveBeenCalled();
+    expect(runCommand).toHaveBeenCalledWith(
+      "/usr/local/bin/keybase",
+      ["chat", "notification-settings", "-disable-typing=true"],
+      expect.objectContaining({
+        timeoutMs: 1000,
+      }),
+    );
   });
 
   it("retries api-listen when the keybase service socket is still booting", async () => {
@@ -502,21 +524,57 @@ describe("Keybase CLI transport", () => {
     expect(trimmed).toHaveLength(KEYBASE_STDERR_RING_BYTES);
   });
 
-  it("bounds api-listen readline line length", () => {
-    vi.mocked(createInterface).mockClear();
+  it("drops overlong api-listen stdout lines before parsing events", () => {
     const child = createListenChild();
     const spawnCommand = vi.fn().mockReturnValueOnce(child);
+    const onError = vi.fn();
+    const onEvent = vi.fn();
+    const stdout = child.stdout as unknown as PassThrough;
 
     const handle = startKeybaseApiListen({
-      onEvent: vi.fn(),
+      onError,
+      onEvent,
       spawnCommand,
     });
 
-    expect(createInterface).toHaveBeenCalledTimes(1);
-    expect(createInterface).toHaveBeenCalledWith(
+    stdout.write("x".repeat(KEYBASE_READLINE_MAX_LINE_LENGTH + 1));
+    expect(onError).toHaveBeenCalledWith(
       expect.objectContaining({
-        crlfDelay: Infinity,
-        maxLineLength: KEYBASE_READLINE_MAX_LINE_LENGTH,
+        message: expect.stringContaining("exceeded"),
+      }),
+    );
+    expect(onEvent).not.toHaveBeenCalled();
+
+    stdout.write("\n");
+    stdout.write(
+      `${JSON.stringify({
+        type: "chat",
+        msg: {
+          id: 1,
+          conversation_id: "conv-1",
+          channel: {
+            name: "lightninglabs",
+            members_type: "team",
+            topic_name: "general",
+          },
+          sender: {
+            username: "roasbeef",
+          },
+          content: {
+            type: "text",
+            text: {
+              body: "@openclaw status",
+            },
+          },
+        },
+      })}\n`,
+    );
+
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.objectContaining({
+          conversationId: "conv-1",
+        }),
       }),
     );
 

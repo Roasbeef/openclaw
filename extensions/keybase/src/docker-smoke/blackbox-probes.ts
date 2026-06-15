@@ -30,6 +30,8 @@ import {
 import { defaultRunCommand } from "./build-image.js";
 import { GATEWAY_SERVICE, type RunCommand, SENDER_SERVICE } from "./scaffold.js";
 
+const KEYBASE_CHANNEL_START_TIMEOUT_MS = 180_000;
+
 export type KeybaseBlackboxContext = {
   botUsername: string;
   composeFile: string;
@@ -39,9 +41,17 @@ export type KeybaseBlackboxContext = {
   runCommand: RunCommand;
   senderUsername: string;
   team: string;
+  timings?: KeybaseBlackboxTimings;
 };
 
 type JsonObject = Record<string, unknown>;
+
+export type KeybaseBlackboxTimings = {
+  apiListenSettleMs?: number;
+  channelSettleMs?: number;
+  restartChannelSettleMs?: number;
+  stopApiListenSettleMs?: number;
+};
 
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -75,6 +85,16 @@ function keybaseConfigPath(outputDir: string): string {
 
 function keybasePairingStorePath(outputDir: string): string {
   return path.join(outputDir, "state", "home", ".openclaw", "credentials", "keybase-pairing.json");
+}
+
+async function resetQaRuntimeState(outputDir: string): Promise<void> {
+  const stateDir = path.join(outputDir, "state", "home", ".openclaw");
+  await Promise.all([
+    fs.rm(path.join(stateDir, "agents", "main", "sessions"), { recursive: true, force: true }),
+    fs.rm(path.join(stateDir, "delivery-queue"), { recursive: true, force: true }),
+    fs.rm(path.join(stateDir, "subagents"), { recursive: true, force: true }),
+    fs.rm(path.join(stateDir, "tasks"), { recursive: true, force: true }),
+  ]);
 }
 
 function resolveKeybaseBlackboxPaths(params: {
@@ -115,6 +135,7 @@ export async function prepareKeybaseBlackboxContext(params: {
   outputDir: string;
   runCommand?: RunCommand;
   team: string;
+  timings?: KeybaseBlackboxTimings;
 }): Promise<KeybaseBlackboxContext> {
   const paths = resolveKeybaseBlackboxPaths(params);
   const botUsername = params.botUsername.trim();
@@ -125,6 +146,27 @@ export async function prepareKeybaseBlackboxContext(params: {
   if (!team) {
     throw new Error("Keybase blackbox team is required");
   }
+  const composeArgs = buildComposeArgs({
+    composeFile: paths.composeFile,
+    envFile: paths.envFile,
+    profile: "blackbox",
+  });
+  try {
+    await runCompose({
+      cwd: paths.outputDir,
+      runCommand: paths.runCommand,
+      args: [...composeArgs, "stop", GATEWAY_SERVICE, SENDER_SERVICE],
+    });
+    await runCompose({
+      cwd: paths.outputDir,
+      runCommand: paths.runCommand,
+      args: [...composeArgs, "rm", "-f", SENDER_SERVICE],
+    });
+  } catch {
+    // Fresh scaffolds may not have containers yet. The subsequent `up` call is
+    // authoritative; this cleanup only prevents stale in-process session state.
+  }
+  await resetQaRuntimeState(paths.outputDir);
   await ensureBaseQaConfig({
     outputDir: paths.outputDir,
     team,
@@ -133,17 +175,7 @@ export async function prepareKeybaseBlackboxContext(params: {
   await runCompose({
     cwd: paths.outputDir,
     runCommand: paths.runCommand,
-    args: [
-      ...buildComposeArgs({
-        composeFile: paths.composeFile,
-        envFile: paths.envFile,
-        profile: "blackbox",
-      }),
-      "up",
-      "-d",
-      GATEWAY_SERVICE,
-      SENDER_SERVICE,
-    ],
+    args: [...composeArgs, "up", "-d", GATEWAY_SERVICE, SENDER_SERVICE],
   });
   await waitForServiceWhoami({
     composeFile: paths.composeFile,
@@ -166,7 +198,16 @@ export async function prepareKeybaseBlackboxContext(params: {
     cwd: paths.outputDir,
     envFile: paths.envFile,
     runCommand: paths.runCommand,
-    timeoutMs: 90_000,
+    settleMs: params.timings?.channelSettleMs,
+    timeoutMs: KEYBASE_CHANNEL_START_TIMEOUT_MS,
+  });
+  await waitForGatewayApiListenProcess({
+    composeFile: paths.composeFile,
+    cwd: paths.outputDir,
+    envFile: paths.envFile,
+    runCommand: paths.runCommand,
+    settleMs: params.timings?.apiListenSettleMs,
+    timeoutMs: KEYBASE_CHANNEL_START_TIMEOUT_MS,
   });
 
   const listResult = await runKeybaseApiInService<{
@@ -192,6 +233,7 @@ export async function prepareKeybaseBlackboxContext(params: {
     conversationId,
     senderUsername: normalizeUsername(senderUsername),
     team,
+    ...(params.timings ? { timings: params.timings } : {}),
   };
 }
 
@@ -200,6 +242,14 @@ export async function sendKeybaseBlackboxMessage(params: {
   conversation?: KeybaseBlackboxConversation;
   context: KeybaseBlackboxContext;
 }): Promise<string> {
+  await waitForServiceWhoami({
+    composeFile: params.context.composeFile,
+    cwd: params.context.outputDir,
+    envFile: params.context.envFile,
+    runCommand: params.context.runCommand,
+    service: SENDER_SERVICE,
+    timeoutMs: 90_000,
+  });
   const sendResult = await runKeybaseApiInService<{
     id?: number | string | null;
     outbox_id?: string | null;
@@ -393,9 +443,47 @@ export async function restartKeybaseGateway(context: KeybaseBlackboxContext): Pr
     envFile: context.envFile,
     minLastStartAt: restartedAt,
     runCommand: context.runCommand,
-    settleMs: 5_000,
-    timeoutMs: 90_000,
+    settleMs: context.timings?.restartChannelSettleMs ?? 5_000,
+    timeoutMs: KEYBASE_CHANNEL_START_TIMEOUT_MS,
   });
+  await waitForGatewayApiListenProcess({
+    composeFile: context.composeFile,
+    cwd: context.outputDir,
+    envFile: context.envFile,
+    runCommand: context.runCommand,
+    settleMs: context.timings?.apiListenSettleMs,
+    timeoutMs: KEYBASE_CHANNEL_START_TIMEOUT_MS,
+  });
+}
+
+async function waitForGatewayApiListenProcess(params: {
+  composeFile: string;
+  cwd: string;
+  envFile: string;
+  runCommand: RunCommand;
+  settleMs?: number;
+  timeoutMs: number;
+}): Promise<void> {
+  const deadline = Date.now() + params.timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      await runComposeExec({
+        composeFile: params.composeFile,
+        cwd: params.cwd,
+        envFile: params.envFile,
+        runCommand: params.runCommand,
+        service: GATEWAY_SERVICE,
+        command: ["sh", "-lc", "ps ax -o args= | grep -q '[k]eybase .*chat api-listen'"],
+      });
+      await sleep(params.settleMs ?? 1_000);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(1_000);
+  }
+  throw new Error(`Timed out waiting for Keybase api-listen process: ${String(lastError)}`);
 }
 
 export async function stopKeybaseApiListenChild(context: KeybaseBlackboxContext): Promise<void> {
@@ -410,12 +498,11 @@ export async function stopKeybaseApiListenChild(context: KeybaseBlackboxContext)
       "-lc",
       [
         "pids=\"$(ps ax -o pid= -o args= | awk '/[k]eybase .*chat api-listen/ {print $1}')\"",
-        'test -n "$pids"',
-        "kill $pids",
+        'test -z "$pids" || kill $pids',
       ].join("; "),
     ],
   });
-  await sleep(3_000);
+  await sleep(context.timings?.stopApiListenSettleMs ?? 3_000);
 }
 
 function buildDirectConversation(botUsername: string): KeybaseBlackboxConversation {
@@ -435,6 +522,7 @@ export async function runMentionReplyProbe(params: {
 }): Promise<Record<string, unknown>> {
   const startedAt = Date.now();
   const body = `@${params.context.botUsername} reply exactly: ${params.prefix} ${params.marker}`;
+  const expectedReplyText = `${params.prefix} ${params.marker}`;
   const sentMessageId = await sendKeybaseBlackboxMessage({
     body,
     context: params.context,
@@ -446,6 +534,7 @@ export async function runMentionReplyProbe(params: {
     cwd: params.context.outputDir,
     envFile: params.context.envFile,
     expectedAckReaction: params.expectedAckReaction ?? DEFAULT_BLACKBOX_ACK_REACTION,
+    expectedReplyText,
     runCommand: params.context.runCommand,
     sentMessageId,
     startedAt,
@@ -799,6 +888,7 @@ export async function runDirectMessageReplyProbe(params: {
       cwd: params.context.outputDir,
       envFile: params.context.envFile,
       expectedAckReaction: false,
+      expectedReplyText: `keybase dm canary ok ${params.marker}`,
       runCommand: params.context.runCommand,
       sentMessageId,
       startedAt,
@@ -815,6 +905,7 @@ export async function runDirectMessageReplyProbe(params: {
     };
   } finally {
     await restoreConfig();
+    await restartKeybaseGateway(params.context);
   }
 }
 

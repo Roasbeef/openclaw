@@ -201,6 +201,12 @@ The text `/approve` path remains available as a fallback. If no Keybase
 approvers are configured, same-chat text approval behavior stays governed by the
 normal channel command authorization.
 
+Approver resolution is unified across exec and plugin approvals:
+`execApprovals.approvers` is consulted first, and only when it is unset or
+empty does OpenClaw fall back to the broader `allowFrom` DM allowlist. An
+operator narrowing the approver list therefore tightens both surfaces in one
+place, with no asymmetry between exec and plugin gating.
+
 Native approval prompts send a bounded first message so reaction shortcuts can
 attach reliably. If the approval body is larger than Keybase's message cap,
 OpenClaw posts the full details as chunked follow-up messages.

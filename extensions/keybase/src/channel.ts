@@ -255,19 +255,28 @@ export const keybasePlugin = createChatChannelPlugin({
         if (!parsed) {
           return null;
         }
+        // M-8: opaque `conv:<id>` targets have no chatType — they could be
+        // either a DM or a team channel. Default to "channel" routing so we
+        // don't misclassify a team conversation as a 1:1 DM (which would
+        // weaken DM-policy / approver checks downstream).
+        const peerKind: "direct" | "channel" = parsed.chatType === "direct" ? "direct" : "channel";
+        const peerId =
+          parsed.chatType === "group"
+            ? (normalizeKeybaseGroupKey(parsed.normalized) ?? parsed.normalized)
+            : parsed.normalized;
+        const chatType: "direct" | "group" | "channel" =
+          parsed.chatType === "direct"
+            ? "direct"
+            : parsed.chatType === "group"
+              ? "group"
+              : "channel";
         return buildChannelOutboundSessionRoute({
           cfg,
           agentId,
           channel: CHANNEL_ID,
           accountId,
-          peer: {
-            kind: parsed.chatType === "direct" ? "direct" : "channel",
-            id:
-              parsed.chatType === "group"
-                ? (normalizeKeybaseGroupKey(parsed.normalized) ?? parsed.normalized)
-                : parsed.normalized,
-          },
-          chatType: parsed.chatType,
+          peer: { kind: peerKind, id: peerId },
+          chatType,
           from: `keybase:${accountId ?? DEFAULT_ACCOUNT_ID}`,
           to: parsed.normalized,
         });

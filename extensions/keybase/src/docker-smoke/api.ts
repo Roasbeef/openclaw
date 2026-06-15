@@ -385,7 +385,58 @@ export async function readChannelStatus(params: {
     envFile: params.envFile,
     runCommand: params.runCommand,
     service: GATEWAY_SERVICE,
-    command: ["node", "dist/index.js", "channels", "status", "--json"],
+    command: [
+      "node",
+      "--input-type=module",
+      "-e",
+      [
+        'import fs from "node:fs";',
+        'const cfg = JSON.parse(fs.readFileSync("/home/node/.openclaw/openclaw.json", "utf8"));',
+        "const token = cfg?.gateway?.auth?.token;",
+        'if (!token) throw new Error("missing gateway token");',
+        'const ws = new WebSocket("ws://127.0.0.1:18789");',
+        "const waitFrame = (predicate, label) => new Promise((resolve, reject) => {",
+        "  const timer = setTimeout(() => reject(new Error(`timeout waiting for ${label}`)), 10000);",
+        "  const cleanup = () => { clearTimeout(timer); ws.removeEventListener('message', onMessage); ws.removeEventListener('error', onError); };",
+        "  const onError = (event) => { cleanup(); reject(event.error ?? new Error(`websocket ${label} error`)); };",
+        "  const onMessage = (event) => {",
+        "    const frame = JSON.parse(String(event.data));",
+        "    if (!predicate(frame)) return;",
+        "    cleanup();",
+        "    resolve(frame);",
+        "  };",
+        "  ws.addEventListener('message', onMessage);",
+        "  ws.addEventListener('error', onError);",
+        "});",
+        "await new Promise((resolve, reject) => {",
+        "  const timer = setTimeout(() => reject(new Error('timeout waiting for websocket open')), 10000);",
+        "  ws.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });",
+        "  ws.addEventListener('error', (event) => { clearTimeout(timer); reject(event.error ?? new Error('websocket open error')); }, { once: true });",
+        "});",
+        "const challenge = await waitFrame((frame) => frame?.type === 'event' && frame.event === 'connect.challenge', 'connect challenge');",
+        "ws.send(JSON.stringify({",
+        "  type: 'req',",
+        "  id: 'connect-1',",
+        "  method: 'connect',",
+        "  params: {",
+        "    minProtocol: 3,",
+        "    maxProtocol: 3,",
+        "    client: { id: 'gateway-client', displayName: 'keybase-smoke', version: 'smoke', platform: process.platform, mode: 'backend' },",
+        "    caps: [],",
+        "    auth: { token },",
+        "    role: 'operator',",
+        "    scopes: ['operator.read'],",
+        "  },",
+        "}));",
+        "const connected = await waitFrame((frame) => frame?.type === 'res' && frame.id === 'connect-1', 'connect response');",
+        "if (!connected.ok) throw new Error(`gateway connect failed: ${JSON.stringify(connected.error)}`);",
+        "ws.send(JSON.stringify({ type: 'req', id: 'status-1', method: 'channels.status', params: { probe: false, timeoutMs: 10000 } }));",
+        "const status = await waitFrame((frame) => frame?.type === 'res' && frame.id === 'status-1', 'channels.status');",
+        "if (!status.ok) throw new Error(`channels.status failed: ${JSON.stringify(status.error)}`);",
+        "ws.close();",
+        "process.stdout.write(JSON.stringify(status.payload));",
+      ].join("\n"),
+    ],
   });
   const status = parseJsonFromCommand(result.stdout) as {
     channelAccounts?: {
@@ -499,6 +550,7 @@ export async function waitForBlackboxReply(params: {
   cwd: string;
   envFile: string;
   expectedAckReaction?: string | false;
+  expectedReplyText?: string;
   runCommand: RunCommand;
   sentMessageId: string;
   startedAt: number;
@@ -566,7 +618,15 @@ export async function waitForBlackboxReply(params: {
         })
       : undefined;
     const replyBody = reply ? readMessageBody(reply) : "";
-    if (reply && hasFreshStatus && replyBody && (!expectedAckReaction || reaction)) {
+    const hasExpectedReplyText =
+      !params.expectedReplyText || replyBody.includes(params.expectedReplyText);
+    if (
+      reply &&
+      hasFreshStatus &&
+      replyBody &&
+      hasExpectedReplyText &&
+      (!expectedAckReaction || reaction)
+    ) {
       const reactionBody = reaction ? readReactionBody(reaction) : undefined;
       const reactionMessageId = normalizeMessageId(reaction?.msg?.id);
       return {
@@ -829,8 +889,18 @@ export async function waitForNoBotResponse(params: {
 }): Promise<void> {
   const deadline = Date.now() + params.quietMs;
   let sawSuccessfulRead = false;
+  let sawFreshInbound = false;
+  let lastStatusError: string | null = null;
   let lastReadError: string | null = null;
   while (Date.now() < deadline) {
+    try {
+      const status = await readChannelStatus(params);
+      lastStatusError = status.lastError;
+      sawFreshInbound = sawFreshInbound || (status.running && status.inboundAt >= params.startedAt);
+    } catch (error) {
+      lastStatusError = formatUnknownError(error);
+    }
+
     let messages: KeybaseMessageSummary[];
     try {
       messages = await readKeybaseMessagesInSender({
@@ -863,6 +933,13 @@ export async function waitForNoBotResponse(params: {
   if (!sawSuccessfulRead && lastReadError) {
     throw new Error(
       `Timed out checking for absent Keybase bot response; last sender read error: ${lastReadError}`,
+    );
+  }
+  if (!sawFreshInbound) {
+    throw new Error(
+      `Timed out waiting for Keybase channel to process blocked message ${params.sentMessageId}; last channel error: ${
+        lastStatusError ?? "none"
+      }`,
     );
   }
 }

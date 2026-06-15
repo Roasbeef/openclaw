@@ -57,10 +57,18 @@ if [ "${OPENCLAW_SOURCE_SECRET_ENV:-1}" != "0" ]; then
 fi
 
 if [ "${OPENCLAW_CONFIGURE_GITHUB_TOKEN:-0}" = "1" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+  git_auth_dir=${OPENCLAW_GIT_AUTH_DIR:-}
+  if [ -n "$git_auth_dir" ]; then
+    install -d -m 700 "$git_auth_dir"
+    export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-$git_auth_dir/gitconfig}"
+    git_credentials_file="${OPENCLAW_GIT_CREDENTIALS_FILE:-$git_auth_dir/git-credentials}"
+  else
+    git_credentials_file="${OPENCLAW_GIT_CREDENTIALS_FILE:-${HOME}/.git-credentials}"
+  fi
   if command -v git >/dev/null 2>&1; then
-    git config --global credential.helper store
-    printf 'https://x-access-token:%s@github.com\n' "$GITHUB_TOKEN" > "${HOME}/.git-credentials"
-    chmod 600 "${HOME}/.git-credentials"
+    git config --global credential.helper "store --file=$git_credentials_file"
+    printf 'https://x-access-token:%s@github.com\n' "$GITHUB_TOKEN" > "$git_credentials_file"
+    chmod 600 "$git_credentials_file"
     git config --global url."https://github.com/".insteadOf "git@github.com:"
   fi
   if command -v gh >/dev/null 2>&1; then

@@ -2,14 +2,27 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readdir, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { appendKeybaseStderr } from "./client.js";
 
 const KEYBASE_SERVICE_MAX_ATTEMPTS = 5;
 const KEYBASE_SERVICE_KILL_TIMEOUT_MS = 5_000;
 const KEYBASE_SERVICE_SIGKILL_GRACE_MS = 1_000;
+const KEYBASE_ENTRYPOINT_STDERR_RING_BYTES = 65_536;
+const KEYBASE_RUNTIME_PAPERKEY_FILE = "keybase-paperkey";
 // H-8: bumped from 1s so well-behaved descendants get a real chance to exit on SIGTERM.
 const KEYBASE_LINGERING_PID_TERM_GRACE_MS = 2_000;
 const KEYBASE_LINGERING_PID_ANCESTOR_DEPTH = 8;
+
+function appendKeybaseEntrypointStderr(
+  buffer: string,
+  chunk: string,
+  maxBytes: number = KEYBASE_ENTRYPOINT_STDERR_RING_BYTES,
+): string {
+  const combined = buffer + chunk;
+  if (combined.length <= maxBytes) {
+    return combined;
+  }
+  return combined.slice(combined.length - maxBytes);
+}
 
 async function awaitChildExit(
   child: ChildProcess,
@@ -198,23 +211,54 @@ export function applyKeybaseContainerConfig(
   if (resolved.username) {
     channel.username = resolved.username;
   }
+  if (resolved.paperKeyFile) {
+    channel.paperKeyFile = resolved.paperKeyFile;
+  }
+  if (resolved.paperKey) {
+    delete channel.paperKey;
+  }
   channels.keybase = channel;
   next.channels = channels;
 
   if (isRecord(next.gateway)) {
     const gateway = { ...next.gateway };
+    // M-4: strip insecure-auth flags consistently from BOTH gateway.auth and
+    // gateway.controlUi. The container always boots Keybase under whatever
+    // auth was configured by the operator; an inherited `allowInsecureAuth`
+    // (e.g. left over from the docker-smoke scaffold) must not silently
+    // disable transport hardening here.
     const auth = isRecord(gateway.auth) ? { ...gateway.auth } : undefined;
     if (auth && "allowInsecureAuth" in auth) {
       delete auth.allowInsecureAuth;
+      console.warn(
+        "[keybase] container entrypoint stripping gateway.auth.allowInsecureAuth from openclaw.json before write",
+      );
     }
     if (auth && Object.keys(auth).length > 0) {
       gateway.auth = auth;
     } else if ("auth" in gateway) {
       delete gateway.auth;
     }
+    const controlUi = isRecord(gateway.controlUi) ? { ...gateway.controlUi } : undefined;
+    if (controlUi && "allowInsecureAuth" in controlUi) {
+      delete controlUi.allowInsecureAuth;
+      console.warn(
+        "[keybase] container entrypoint stripping gateway.controlUi.allowInsecureAuth from openclaw.json before write",
+      );
+    }
+    if (controlUi && Object.keys(controlUi).length > 0) {
+      gateway.controlUi = controlUi;
+    } else if ("controlUi" in gateway) {
+      delete gateway.controlUi;
+    }
     next.gateway = gateway;
   }
 
+  // NOTE: pre-write Zod validation against KeybaseChannelConfigSchema is
+  // intentionally deferred. The full openclaw config schema lives outside this
+  // extension boundary and pulling it in here would create a heavyweight
+  // import cycle through plugin-sdk; keep the JSON-clone shape coercion until
+  // the schema is exposed as a thin runtime dep.
   return next;
 }
 
@@ -248,6 +292,25 @@ async function resolvePaperKey(
   const contents = await deps.readFile(resolved.paperKeyFile, "utf8");
   const trimmed = contents.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+async function materializeRuntimePaperKeyFile(
+  resolved: ResolvedKeybaseContainerConfig,
+  deps: Pick<RuntimeDeps, "writeFile">,
+): Promise<ResolvedKeybaseContainerConfig> {
+  if (!resolved.paperKey || resolved.paperKeyFile) {
+    return resolved;
+  }
+  const paperKeyFile = path.join(resolved.runtimeDir, KEYBASE_RUNTIME_PAPERKEY_FILE);
+  await deps.writeFile(paperKeyFile, `${resolved.paperKey.trim()}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return {
+    ...resolved,
+    paperKey: undefined,
+    paperKeyFile,
+  };
 }
 
 function buildKeybaseBaseArgs(resolved: ResolvedKeybaseContainerConfig): string[] {
@@ -319,7 +382,7 @@ async function runKeybaseCommand(
     let stderr = "";
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string | Buffer) => {
-      stderr = appendKeybaseStderr(stderr, chunk.toString());
+      stderr = appendKeybaseEntrypointStderr(stderr, chunk.toString());
     });
     child.once("error", reject);
     child.once("exit", (code, signal) => {
@@ -456,6 +519,7 @@ export async function findLingeringKeybasePids(
 
   const ppidMap = await buildPpidMap(entries, deps);
   const expectedExeBasename = path.basename(resolvedBinary);
+  const expectedExePath = path.isAbsolute(resolvedBinary) ? resolvedBinary : undefined;
   const expectedEnvToken = `KEYBASE_HOME=${keybaseHome}`;
 
   const pids: number[] = [];
@@ -481,7 +545,7 @@ export async function findLingeringKeybasePids(
     if (path.basename(exeLink) !== expectedExeBasename) {
       continue;
     }
-    if (exeLink !== resolvedBinary) {
+    if (expectedExePath && exeLink !== expectedExePath) {
       continue;
     }
 
@@ -589,7 +653,7 @@ async function startKeybaseService(
     let earlyExitAlreadyRunning = false;
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string | Buffer) => {
-      stderr = appendKeybaseStderr(stderr, chunk.toString());
+      stderr = appendKeybaseEntrypointStderr(stderr, chunk.toString());
     });
     child.once("exit", (code, signal) => {
       if (ready) {
@@ -699,28 +763,32 @@ export async function prepareKeybaseContainer(
   await runtimeDeps.mkdir(path.dirname(resolved.pidFile), { recursive: true });
   await runtimeDeps.mkdir(path.dirname(resolved.socketFile), { recursive: true });
   await runtimeDeps.mkdir(resolved.tmpDir, { recursive: true });
+  const runtimeResolved = await materializeRuntimePaperKeyFile(resolved, runtimeDeps);
 
   const nextConfig = applyKeybaseContainerConfig(
     await readExistingConfig(resolved.configPath, runtimeDeps),
-    resolved,
+    runtimeResolved,
   );
-  await runtimeDeps.writeFile(
-    resolved.configPath,
-    `${JSON.stringify(nextConfig, null, 2)}\n`,
-    "utf8",
-  );
+  // M-5: openclaw.json may carry tokens, paper-key paths, and other
+  // identity-binding state. Default 0644 is too loose for a multi-user host;
+  // pin to 0600 (owner read/write) so it stays out of "world readable" mode
+  // even on permissive umasks.
+  await runtimeDeps.writeFile(resolved.configPath, `${JSON.stringify(nextConfig, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
 
-  const paperKey = await resolvePaperKey(resolved, runtimeDeps);
-  if (!resolved.autoOneshot || !resolved.username || !paperKey) {
+  const paperKey = await resolvePaperKey(runtimeResolved, runtimeDeps);
+  if (!runtimeResolved.autoOneshot || !runtimeResolved.username || !paperKey) {
     return;
   }
 
-  if (await isExistingKeybaseServiceReady(resolved, runtimeDeps)) {
+  if (await isExistingKeybaseServiceReady(runtimeResolved, runtimeDeps)) {
     return;
   }
 
-  await stopExistingKeybaseService(resolved, runtimeDeps);
-  await startKeybaseService(resolved, paperKey, runtimeDeps);
+  await stopExistingKeybaseService(runtimeResolved, runtimeDeps);
+  await startKeybaseService(runtimeResolved, paperKey, runtimeDeps);
 }
 
 export function buildSpawnEnv(

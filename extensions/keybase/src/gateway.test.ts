@@ -63,7 +63,9 @@ function buildAccount(overrides: Partial<ResolvedKeybaseAccount> = {}): Resolved
     multiPartyDmPolicy: "deny",
     homeDir: undefined,
     name: undefined,
-    paperKey: undefined,
+    // Tests default to a paperKey so M-12's "no paperkey" fail-fast doesn't
+    // short-circuit the listener. Tests that exercise that branch override.
+    paperKey: "pk-test",
     paperKeyFile: undefined,
     username: "openclaw",
     ...overrides,
@@ -113,6 +115,7 @@ function createRuntimeHarness(options?: { commandAuthorized?: boolean }) {
 function buildTextEvent(params: {
   atMentionUsernames?: string[];
   body: string;
+  channelMention?: string;
   channelName?: string;
   conversationId?: string;
   id?: number;
@@ -129,6 +132,7 @@ function buildTextEvent(params: {
       raw: {},
       conversationId: params.conversationId ?? "conv-1",
       atMentionUsernames: params.atMentionUsernames ?? [],
+      ...(params.channelMention ? { channelMention: params.channelMention } : {}),
       channel: {
         name: params.channelName ?? params.teamName ?? "openclaw,sender",
         ...(params.membersType ? { membersType: params.membersType } : {}),
@@ -196,6 +200,42 @@ describe("keybaseGatewayAdapter.startAccount", () => {
     clearKeybaseApprovalReactionTargetsForTest();
   });
 
+  // M-12: a configured username with no paperKey / paperKeyFile means the
+  // bootstrap oneshot will silently skip and the listener will spin without
+  // an authenticated CLI. Refuse to start and surface a clear lastError
+  // instead.
+  it("refuses to start a keybase listener when username has no paperkey", async () => {
+    const stop = vi.fn();
+    mocks.startKeybaseApiListen.mockReturnValue({
+      child: {} as never,
+      stop,
+    });
+    const harness = createRuntimeHarness();
+    const abort = new AbortController();
+    const statusPatches: Array<Record<string, unknown>> = [];
+    const ctx = createStartAccountContext({
+      account: buildAccount({
+        paperKey: undefined,
+        paperKeyFile: undefined,
+        username: "openclaw",
+      }),
+      abortSignal: abort.signal,
+      statusPatchSink: (snapshot) => {
+        statusPatches.push({ ...snapshot });
+      },
+    });
+    Object.assign(ctx, { channelRuntime: harness.channelRuntime });
+
+    await keybaseGatewayAdapter.startAccount!(ctx);
+
+    expect(mocks.startKeybaseApiListen).not.toHaveBeenCalled();
+    expect(mocks.ensureKeybaseAccountPrepared).not.toHaveBeenCalled();
+    const errorPatch = statusPatches.find(
+      (patch) => typeof patch.lastError === "string" && /missing paperkey/i.test(patch.lastError),
+    );
+    expect(errorPatch).toBeDefined();
+  });
+
   it("issues a pairing challenge for unknown DM senders", async () => {
     const stop = vi.fn();
     mocks.startKeybaseApiListen.mockReturnValue({
@@ -228,6 +268,45 @@ describe("keybaseGatewayAdapter.startAccount", () => {
       });
       expect(String(firstCall?.text)).toContain("Pairing code:");
     });
+
+    abort.abort();
+    await task;
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  // M-10: upsertPairingRequest dedups challenge state but not the outbound
+  // DM, so a sender that keeps DMing will keep triggering pairing replies.
+  // Throttle to one reply per sender per window — distinct messageIds are
+  // required (otherwise the M-9 dedup masks this).
+  it("throttles pairing replies from the same sender", async () => {
+    const stop = vi.fn();
+    mocks.startKeybaseApiListen.mockReturnValue({
+      child: {} as never,
+      stop,
+    });
+    const harness = createRuntimeHarness();
+    const abort = new AbortController();
+    const ctx = createStartAccountContext({
+      account: buildAccount({ dmPolicy: "pairing", allowFrom: [] }),
+      abortSignal: abort.signal,
+    });
+    Object.assign(ctx, { channelRuntime: harness.channelRuntime });
+
+    const task = keybaseGatewayAdapter.startAccount!(ctx);
+
+    await vi.waitFor(() => expect(mocks.startKeybaseApiListen).toHaveBeenCalledOnce());
+    const args = mocks.startKeybaseApiListen.mock.calls[0]?.[0] as {
+      onEvent: (event: KeybaseListenEvent) => void;
+    };
+    args.onEvent(buildTextEvent({ body: "hello", id: 100 }));
+    args.onEvent(buildTextEvent({ body: "hello again", id: 101 }));
+
+    await vi.waitFor(() => {
+      expect(mocks.sendKeybaseText).toHaveBeenCalledTimes(1);
+    });
+    // Give the second event a tick to settle so we'd notice a late call.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(mocks.sendKeybaseText).toHaveBeenCalledTimes(1);
 
     abort.abort();
     await task;
@@ -286,6 +365,64 @@ describe("keybaseGatewayAdapter.startAccount", () => {
       | undefined;
     expect(dispatchCall?.ctx?.OriginatingChannel).toBe("keybase");
     expect(dispatchCall?.ctx?.OriginatingTo).toBe("conv:conv-2");
+
+    abort.abort();
+    await task;
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  // M-9: a listener restart with replay (or a server bug) can re-emit the
+  // same (conversationId, messageId). The gateway must drop the replay so
+  // the agent doesn't double-reply.
+  it("drops replayed inbound events with the same (conversationId, messageId)", async () => {
+    const stop = vi.fn();
+    mocks.startKeybaseApiListen.mockReturnValue({
+      child: {} as never,
+      stop,
+    });
+    const harness = createRuntimeHarness();
+    const abort = new AbortController();
+    const ctx = createStartAccountContext({
+      account: buildAccount({
+        dmPolicy: "allowlist",
+        allowFrom: ["sender"],
+      }),
+      abortSignal: abort.signal,
+      cfg: {
+        messages: { ackReaction: "", ackReactionScope: "none" },
+        session: { store: { type: "jsonl" } },
+        commands: { useAccessGroups: true },
+      } as never,
+    });
+    Object.assign(ctx, { channelRuntime: harness.channelRuntime });
+
+    const task = keybaseGatewayAdapter.startAccount!(ctx);
+
+    await vi.waitFor(() => expect(mocks.startKeybaseApiListen).toHaveBeenCalledOnce());
+    const args = mocks.startKeybaseApiListen.mock.calls[0]?.[0] as {
+      onEvent: (event: KeybaseListenEvent) => void;
+    };
+
+    const dup = buildTextEvent({
+      body: "hello from keybase",
+      conversationId: "conv-replay",
+      id: 1234,
+    });
+    args.onEvent(dup);
+    args.onEvent(dup);
+    // A different message in the same conversation must still flow through.
+    args.onEvent(
+      buildTextEvent({
+        body: "hello again",
+        conversationId: "conv-replay",
+        id: 1235,
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(mocks.sendKeybaseTextChunks).toHaveBeenCalledTimes(2);
+    });
+    expect(harness.recordInboundSession).toHaveBeenCalledTimes(2);
 
     abort.abort();
     await task;
@@ -363,6 +500,57 @@ describe("keybaseGatewayAdapter.startAccount", () => {
         body: "@openclaw hello from a multi-party DM",
         channelName: "openclaw,sender,third",
         membersType: "impteamnative",
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(harness.recordInboundSession).not.toHaveBeenCalled();
+      expect(harness.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+    });
+
+    abort.abort();
+    await task;
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  // M-11: anyone in a team chat can fire `@here` / `@channel`, so accepting
+  // it as satisfying requireMention=true would let any team member bypass
+  // the per-group allowlist. requireMention must be satisfied only by a
+  // direct atMention, an explicit `@<botusername>`, or a configured
+  // mention pattern.
+  it("does not let @here satisfy requireMention in mention-gated team chats", async () => {
+    const stop = vi.fn();
+    mocks.startKeybaseApiListen.mockReturnValue({
+      child: {} as never,
+      stop,
+    });
+    const harness = createRuntimeHarness();
+    const abort = new AbortController();
+    const ctx = createStartAccountContext({
+      account: buildAccount({
+        groupPolicy: "allowlist",
+        groups: {
+          "team:lightninglabs#lbottest": {
+            allowFrom: [],
+          },
+        },
+      }),
+      abortSignal: abort.signal,
+    });
+    Object.assign(ctx, { channelRuntime: harness.channelRuntime });
+
+    const task = keybaseGatewayAdapter.startAccount!(ctx);
+
+    await vi.waitFor(() => expect(mocks.startKeybaseApiListen).toHaveBeenCalledOnce());
+    const args = mocks.startKeybaseApiListen.mock.calls[0]?.[0] as {
+      onEvent: (event: KeybaseListenEvent) => void;
+    };
+    args.onEvent(
+      buildTextEvent({
+        body: "@here ping the room",
+        channelMention: "here",
+        teamName: "lightninglabs",
+        topicName: "lbottest",
       }),
     );
 

@@ -9,6 +9,11 @@
       "description": "Run the Docker-backed Keybase live QA lane against local bot and sender containers"
     }
   ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
   "channelEnvVars": {
     "keybase": [
       "KEYBASE_BINARY",

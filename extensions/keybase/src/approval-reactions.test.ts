@@ -2,9 +2,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildKeybaseApprovalReactionHint,
   clearKeybaseApprovalReactionTargetsForTest,
+  KEYBASE_APPROVAL_REACTION_MAX_ENTRIES_FOR_TEST,
+  KEYBASE_APPROVAL_REACTION_TTL_MS_FOR_TEST,
   listKeybaseApprovalReactionBindings,
   registerKeybaseApprovalReactionTarget,
   resolveKeybaseApprovalReactionTarget,
+  setKeybaseApprovalReactionNowMsForTest,
   unregisterKeybaseApprovalReactionTarget,
 } from "./approval-reactions.js";
 
@@ -152,6 +155,72 @@ describe("keybase approval reactions", () => {
         reactionBody: ":white_check_mark:",
       }),
     ).toMatchObject({ approvalId: "req-legacy", decision: "allow-once" });
+  });
+
+  it("expires registered reaction targets after the TTL elapses", () => {
+    let nowMs = 1_000_000;
+    setKeybaseApprovalReactionNowMsForTest(() => nowMs);
+    registerKeybaseApprovalReactionTarget({
+      accountId: "ops",
+      targetKey: "conv:abc",
+      messageId: "9",
+      approvalId: "req-ttl",
+      allowedDecisions: ["allow-once", "deny"],
+    });
+    expect(
+      resolveKeybaseApprovalReactionTarget({
+        accountId: "ops",
+        targetKeys: ["conv:abc"],
+        messageId: "9",
+        reactionBody: ":white_check_mark:",
+      }),
+    ).toMatchObject({ approvalId: "req-ttl", decision: "allow-once" });
+
+    nowMs += KEYBASE_APPROVAL_REACTION_TTL_MS_FOR_TEST + 1;
+    expect(
+      resolveKeybaseApprovalReactionTarget({
+        accountId: "ops",
+        targetKeys: ["conv:abc"],
+        messageId: "9",
+        reactionBody: ":white_check_mark:",
+      }),
+    ).toBeNull();
+  });
+
+  it("evicts least-recently-used reaction targets once the cap is reached", () => {
+    setKeybaseApprovalReactionNowMsForTest(() => 1_000);
+    const total = KEYBASE_APPROVAL_REACTION_MAX_ENTRIES_FOR_TEST + 5;
+    for (let i = 0; i < total; i += 1) {
+      registerKeybaseApprovalReactionTarget({
+        accountId: "ops",
+        targetKey: `conv:room-${i}`,
+        messageId: String(i),
+        approvalId: `req-${i}`,
+        allowedDecisions: ["allow-once", "deny"],
+      });
+    }
+
+    // The oldest 5 entries should have been evicted to keep within the cap.
+    for (let i = 0; i < 5; i += 1) {
+      expect(
+        resolveKeybaseApprovalReactionTarget({
+          accountId: "ops",
+          targetKeys: [`conv:room-${i}`],
+          messageId: String(i),
+          reactionBody: ":white_check_mark:",
+        }),
+      ).toBeNull();
+    }
+
+    // The most-recent entry must still resolve.
+    expect(
+      resolveKeybaseApprovalReactionTarget({
+        accountId: "ops",
+        targetKeys: [`conv:room-${total - 1}`],
+        messageId: String(total - 1),
+        reactionBody: ":white_check_mark:",
+      }),
+    ).toMatchObject({ approvalId: `req-${total - 1}`, decision: "allow-once" });
   });
 
   it("stops resolving reactions after the approval message is unregistered", () => {

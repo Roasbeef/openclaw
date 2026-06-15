@@ -185,41 +185,169 @@ function escapeRegexLiteral(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function resolveKeybaseGroupMentionState(params: {
-  account: ResolvedKeybaseAccount;
-  cfg: ChannelGatewayContext["cfg"];
-  message: NonNullable<Extract<KeybaseListenEvent, { type: "chat" }>["message"]>;
-  rawBody: string;
-}): {
-  canDetectMention: boolean;
-  hasAnyMention: boolean;
-  wasMentioned: boolean;
-} {
-  const mentionRegexes = buildMentionRegexes(params.cfg);
-  const normalizedMentions = params.message.atMentionUsernames
-    .map((entry) => normalizeKeybaseUsername(entry ?? ""))
-    .filter((entry): entry is string => Boolean(entry));
-  const accountUsername = normalizeKeybaseUsername(params.account.username ?? "");
-  const botUsername = normalizeKeybaseUsername(params.message.botUsername ?? "");
-  const explicitUsernames = [accountUsername, botUsername].filter((entry): entry is string =>
-    Boolean(entry),
-  );
-  const explicitMention = explicitUsernames.some((username) =>
-    new RegExp(`(^|\\W)@?${escapeRegexLiteral(username)}(?=\\W|$)`, "i").test(params.rawBody),
-  );
-  const nativeMention = explicitUsernames.some((username) => normalizedMentions.includes(username));
-  const patternMention = matchesMentionPatterns(params.rawBody, mentionRegexes);
-  const hasAnyMention =
-    normalizedMentions.length > 0 ||
-    explicitMention ||
-    patternMention ||
-    Boolean(params.message.channelMention?.trim());
+// M-7(a): per-message allocation of `buildMentionRegexes(cfg)` and per-username
+// `new RegExp(...)` showed up as steady-state pressure on hot inbound paths.
+// We memoize both behind a closure scoped to startAccount so cache lifetime
+// matches the listener; eviction is implicit on cfg-identity change (e.g. on
+// hot-reload the new cfg object misses the cache and recompiles once).
+type KeybaseMentionRegexCache = {
+  resolve(params: {
+    account: ResolvedKeybaseAccount;
+    cfg: ChannelGatewayContext["cfg"];
+    message: NonNullable<Extract<KeybaseListenEvent, { type: "chat" }>["message"]>;
+    rawBody: string;
+  }): {
+    canDetectMention: boolean;
+    hasAnyMention: boolean;
+    wasMentioned: boolean;
+  };
+};
+
+function createKeybaseMentionRegexCache(): KeybaseMentionRegexCache {
+  let cachedCfg: ChannelGatewayContext["cfg"] | undefined;
+  let cachedMentionRegexes: RegExp[] = [];
+  const usernameRegexCache = new Map<string, RegExp>();
+
+  function getMentionRegexes(cfg: ChannelGatewayContext["cfg"]): RegExp[] {
+    if (cfg !== cachedCfg) {
+      cachedCfg = cfg;
+      cachedMentionRegexes = buildMentionRegexes(cfg);
+    }
+    return cachedMentionRegexes;
+  }
+
+  function getUsernameRegex(username: string): RegExp {
+    const existing = usernameRegexCache.get(username);
+    if (existing) {
+      return existing;
+    }
+    const compiled = new RegExp(`(^|\\W)@?${escapeRegexLiteral(username)}(?=\\W|$)`, "i");
+    usernameRegexCache.set(username, compiled);
+    return compiled;
+  }
 
   return {
-    canDetectMention: true,
-    hasAnyMention,
-    wasMentioned:
-      nativeMention || explicitMention || patternMention || Boolean(params.message.channelMention),
+    resolve(params) {
+      const mentionRegexes = getMentionRegexes(params.cfg);
+      const normalizedMentions = params.message.atMentionUsernames
+        .map((entry) => normalizeKeybaseUsername(entry ?? ""))
+        .filter((entry): entry is string => Boolean(entry));
+      const accountUsername = normalizeKeybaseUsername(params.account.username ?? "");
+      const botUsername = normalizeKeybaseUsername(params.message.botUsername ?? "");
+      const explicitUsernames = [accountUsername, botUsername].filter((entry): entry is string =>
+        Boolean(entry),
+      );
+      const explicitMention = explicitUsernames.some((username) =>
+        getUsernameRegex(username).test(params.rawBody),
+      );
+      const nativeMention = explicitUsernames.some((username) =>
+        normalizedMentions.includes(username),
+      );
+      const patternMention = matchesMentionPatterns(params.rawBody, mentionRegexes);
+      // M-11: do not treat Keybase `@here`/`@channel` (channelMention) as a
+      // mention for gating purposes. Anyone in a team chat can fire
+      // `@here`, so accepting it would let any team member satisfy
+      // requireMention=true and bypass the per-group allowlist. Real
+      // mentions must come from atMentionUsernames, an explicit
+      // `@<botusername>` in the body, or a configured mention pattern.
+      const hasAnyMention = normalizedMentions.length > 0 || explicitMention || patternMention;
+
+      return {
+        canDetectMention: true,
+        hasAnyMention,
+        wasMentioned: nativeMention || explicitMention || patternMention,
+      };
+    },
+  };
+}
+
+// M-9: Keybase listener restarts (and the inline backoff loop in client.ts)
+// can replay recently-seen messages. Without dedup we re-enter the inbound
+// dispatch and re-process the same message — duplicate replies, duplicate
+// approval reactions, log spam. The dedup is per-listener (one cache per
+// startAccount call) keyed on (conversationId, messageId); accountId is
+// implicit in the closure, so multi-account configs that share a team chat
+// keep independent caches as the gist recommends.
+const KEYBASE_INBOUND_DEDUP_CAPACITY = 512;
+
+type KeybaseInboundDedupCache = {
+  shouldDrop(params: { conversationId: string; messageId: number }): boolean;
+};
+
+function createKeybaseInboundDedupCache(
+  capacity = KEYBASE_INBOUND_DEDUP_CAPACITY,
+): KeybaseInboundDedupCache {
+  // Map insertion order is FIFO. On overflow we evict the oldest entry,
+  // which approximates a sliding-window LRU for the replay scenarios we
+  // care about (a burst of replays within a few seconds of restart).
+  const seen = new Map<string, true>();
+
+  return {
+    shouldDrop({ conversationId, messageId }) {
+      if (!conversationId || !Number.isFinite(messageId)) {
+        return false;
+      }
+      const key = `${conversationId}:${messageId}`;
+      if (seen.has(key)) {
+        return true;
+      }
+      if (seen.size >= capacity) {
+        const oldest = seen.keys().next().value;
+        if (oldest !== undefined) {
+          seen.delete(oldest);
+        }
+      }
+      seen.set(key, true);
+      return false;
+    },
+  };
+}
+
+// M-10: upsertPairingRequest dedups challenge state but the channel still
+// emits a fresh DM reply on every inbound from an unpaired sender. An
+// attacker can spam DMs to flood the chat with bot identity and inflate
+// our logs. Rate-limit pairing-reply emissions per normalized sender;
+// 60 s is enough to absorb retry storms while still letting a real user
+// retry after a short pause.
+const KEYBASE_PAIRING_REPLY_MIN_INTERVAL_MS = 60_000;
+const KEYBASE_PAIRING_REPLY_RATE_LIMIT_CAPACITY = 1024;
+
+type KeybasePairingReplyRateLimiter = {
+  shouldThrottle(senderId: string, nowMs: number): boolean;
+};
+
+function createKeybasePairingReplyRateLimiter(
+  params: {
+    intervalMs?: number;
+    capacity?: number;
+  } = {},
+): KeybasePairingReplyRateLimiter {
+  const intervalMs = params.intervalMs ?? KEYBASE_PAIRING_REPLY_MIN_INTERVAL_MS;
+  const capacity = params.capacity ?? KEYBASE_PAIRING_REPLY_RATE_LIMIT_CAPACITY;
+  // Map insertion order = FIFO eviction; on each call we also opportunistically
+  // expire entries older than the window so the cache doesn't grow unbounded
+  // under steady traffic.
+  const lastSent = new Map<string, number>();
+
+  return {
+    shouldThrottle(senderId, nowMs) {
+      if (!senderId) {
+        return false;
+      }
+      const previous = lastSent.get(senderId);
+      if (previous !== undefined && nowMs - previous < intervalMs) {
+        return true;
+      }
+      lastSent.delete(senderId);
+      if (lastSent.size >= capacity) {
+        const oldest = lastSent.keys().next().value;
+        if (oldest !== undefined) {
+          lastSent.delete(oldest);
+        }
+      }
+      lastSent.set(senderId, nowMs);
+      return false;
+    },
   };
 }
 
@@ -227,6 +355,7 @@ async function handleDirectMessage(params: {
   account: ResolvedKeybaseAccount;
   ctx: ChannelGatewayContext<ResolvedKeybaseAccount>;
   event: Extract<KeybaseListenEvent, { type: "chat" }>;
+  pairingReplyRateLimiter: KeybasePairingReplyRateLimiter;
   statusSink: ReturnType<typeof createAccountStatusSink>;
 }) {
   const message = params.event.message;
@@ -286,6 +415,16 @@ async function handleDirectMessage(params: {
   });
 
   if (resolvedAccess.access.decision === "pairing") {
+    // M-10: pairing-reply rate limit. upsertPairingRequest dedups state but
+    // not the outbound DM. Throttle to one reply per sender per window so
+    // a sender spamming DMs can't repeatedly amplify bot identity in chat
+    // or grow our logs.
+    if (params.pairingReplyRateLimiter.shouldThrottle(senderId, Date.now())) {
+      params.ctx.log?.debug?.(
+        `[${params.account.accountId}] keybase pairing reply throttled for sender=${senderId}`,
+      );
+      return;
+    }
     await issuePairingChallenge({
       senderId,
       senderIdLine: `Your Keybase username: ${senderId}`,
@@ -396,6 +535,7 @@ async function handleGroupMessage(params: {
   account: ResolvedKeybaseAccount;
   ctx: ChannelGatewayContext<ResolvedKeybaseAccount>;
   event: Extract<KeybaseListenEvent, { type: "chat" }>;
+  mentionRegexCache: KeybaseMentionRegexCache;
   statusSink: ReturnType<typeof createAccountStatusSink>;
 }) {
   const message = params.event.message;
@@ -517,7 +657,7 @@ async function handleGroupMessage(params: {
   });
 
   const requireMention = resolveKeybaseGroupRequireMention(groupMatch);
-  const mentionState = resolveKeybaseGroupMentionState({
+  const mentionState = params.mentionRegexCache.resolve({
     account: params.account,
     cfg: params.ctx.cfg,
     message,
@@ -751,9 +891,23 @@ async function handleKeybaseListenEvent(params: {
   account: ResolvedKeybaseAccount;
   ctx: ChannelGatewayContext<ResolvedKeybaseAccount>;
   event: KeybaseListenEvent;
+  inboundDedup: KeybaseInboundDedupCache;
+  mentionRegexCache: KeybaseMentionRegexCache;
+  pairingReplyRateLimiter: KeybasePairingReplyRateLimiter;
   statusSink: ReturnType<typeof createAccountStatusSink>;
 }) {
   if (params.event.type !== "chat" || !params.event.message) {
+    return;
+  }
+  if (
+    params.inboundDedup.shouldDrop({
+      conversationId: params.event.message.conversationId,
+      messageId: params.event.message.id,
+    })
+  ) {
+    params.ctx.log?.debug?.(
+      `[${params.account.accountId}] dropping replayed Keybase event conv=${params.event.message.conversationId} id=${params.event.message.id}`,
+    );
     return;
   }
   if (params.event.message.content.type === "reaction") {
@@ -772,6 +926,7 @@ async function handleKeybaseListenEvent(params: {
       account: params.account,
       ctx: params.ctx,
       event: params.event,
+      pairingReplyRateLimiter: params.pairingReplyRateLimiter,
       statusSink: params.statusSink,
     });
     return;
@@ -780,6 +935,7 @@ async function handleKeybaseListenEvent(params: {
     account: params.account,
     ctx: params.ctx,
     event: params.event,
+    mentionRegexCache: params.mentionRegexCache,
     statusSink: params.statusSink,
   });
 }
@@ -798,6 +954,32 @@ export const keybaseGatewayAdapter: NonNullable<ChannelPlugin<ResolvedKeybaseAcc
         enabled: account.enabled,
         dmPolicy: account.dmPolicy,
       });
+
+      // M-12: a `channels.keybase` block enables the channel by default. If
+      // the operator forgets to wire up KEYBASE_PAPERKEY/_FILE the bootstrap
+      // oneshot is silently skipped (see ensureKeybaseAccountPrepared) and
+      // the listener spins on a CLI that has nothing to authenticate as.
+      // Refuse to start and surface a clear status so the misconfiguration
+      // is visible instead of silent. We only check string presence here;
+      // an unreadable paperKeyFile still throws from ensureKeybaseAccountPrepared.
+      if (account.username && !account.paperKey && !account.paperKeyFile) {
+        const message =
+          "missing paperkey: set channels.keybase.paperKey or paperKeyFile (or the KEYBASE_PAPERKEY / KEYBASE_PAPERKEY_FILE env vars)";
+        ctx.log?.error?.(`[${account.accountId}] keybase ${message}`);
+        statusSink({ lastError: message });
+        return;
+      }
+
+      // M-7(a): cache lives for the lifetime of this listener so we don't
+      // pay buildMentionRegexes + per-username RegExp compile costs per
+      // inbound message. Cache invalidates on cfg-identity change.
+      const mentionRegexCache = createKeybaseMentionRegexCache();
+      // M-9: dedup recently-seen (conversationId, messageId) so listener
+      // restarts that replay events don't re-enter the dispatch path.
+      const inboundDedup = createKeybaseInboundDedupCache();
+      // M-10: per-sender pairing-reply rate limit so a sender DM-spamming
+      // can't keep flooding the chat with pairing prompts.
+      const pairingReplyRateLimiter = createKeybasePairingReplyRateLimiter();
 
       await ensureKeybaseAccountPrepared(account);
       registerChannelRuntimeContext({
@@ -824,7 +1006,15 @@ export const keybaseGatewayAdapter: NonNullable<ChannelPlugin<ResolvedKeybaseAcc
             },
             restartOnExit: true,
             onEvent: (event) => {
-              void handleKeybaseListenEvent({ account, ctx, event, statusSink }).catch((error) => {
+              void handleKeybaseListenEvent({
+                account,
+                ctx,
+                event,
+                inboundDedup,
+                mentionRegexCache,
+                pairingReplyRateLimiter,
+                statusSink,
+              }).catch((error) => {
                 ctx.log?.error?.(
                   `[${account.accountId}] keybase inbound handler failed: ${String(error)}`,
                 );

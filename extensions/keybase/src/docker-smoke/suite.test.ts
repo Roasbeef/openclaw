@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,28 @@ import { writeKeybaseDockerSmokeFiles } from "./scaffold.js";
 import { runKeybaseDockerBlackboxSmoke, runKeybaseDockerBlackboxSuite } from "./suite.js";
 
 const cleanups: Array<() => Promise<void>> = [];
+const TEST_TIMINGS = {
+  apiListenSettleMs: 0,
+  channelSettleMs: 0,
+  restartChannelSettleMs: 0,
+  stopApiListenSettleMs: 0,
+};
+
+function isChannelStatusProbe(args: readonly string[]): boolean {
+  return (
+    (args.includes("channels") && args.includes("status")) ||
+    args.join(" ").includes("channels.status")
+  );
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 afterEach(async () => {
   while (cleanups.length > 0) {
@@ -31,6 +53,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
           botUsername: "lbottestbot",
           outputDir,
           team: "lbottest",
+          timings: TEST_TIMINGS,
         },
         {
           async runCommand(command, args, cwd) {
@@ -38,7 +61,10 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
             if (args.includes("whoami")) {
               return { stderr: "", stdout: "ok\n" };
             }
-            if (args.includes("channels") && args.includes("status")) {
+            if (args.join(" ").includes("chat api-listen")) {
+              return { stderr: "", stdout: "" };
+            }
+            if (isChannelStatusProbe(args)) {
               return {
                 stderr: "",
                 stdout: JSON.stringify({
@@ -109,7 +135,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
                               type: "text",
                               text: {
                                 replyTo: 101,
-                                body: "keybase blackbox smoke ok",
+                                body: "keybase blackbox smoke ok keybase-blackbox-1776994500000",
                               },
                             },
                           },
@@ -131,13 +157,20 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
         botUsername: "lbottestbot",
         inboundAt: 1_776_994_501_000,
         outboundAt: 1_776_994_502_000,
-        replyPreview: "keybase blackbox smoke ok",
+        replyPreview: "keybase blackbox smoke ok keybase-blackbox-1776994500000",
         sentMessageId: "101",
         team: "lbottest",
       });
       expect(calls[0]).toContain(
-        `docker compose --env-file ${outputDir}/.env -f ${outputDir}/docker-compose.keybase.yml --profile blackbox up -d openclaw-keybase-gateway openclaw-keybase-sender`,
+        `docker compose --env-file ${outputDir}/.env -f ${outputDir}/docker-compose.keybase.yml --profile blackbox stop openclaw-keybase-gateway`,
       );
+      expect(
+        calls.some((call) =>
+          call.includes(
+            `docker compose --env-file ${outputDir}/.env -f ${outputDir}/docker-compose.keybase.yml --profile blackbox up -d openclaw-keybase-gateway openclaw-keybase-sender`,
+          ),
+        ),
+      ).toBe(true);
       expect(calls.some((call) => call.includes("openclaw-keybase-sender keybase"))).toBe(true);
     } finally {
       now.mockRestore();
@@ -162,13 +195,17 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
           outputDir,
           scenarioIds: ["canary", "help-command"],
           team: "lbottest",
+          timings: TEST_TIMINGS,
         },
         {
           async runCommand(_command, args) {
             if (args.includes("whoami")) {
               return { stderr: "", stdout: "ok\n" };
             }
-            if (args.includes("channels") && args.includes("status")) {
+            if (args.join(" ").includes("chat api-listen")) {
+              return { stderr: "", stdout: "" };
+            }
+            if (isChannelStatusProbe(args)) {
               return {
                 stderr: "",
                 stdout: JSON.stringify({
@@ -250,7 +287,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
                               type: "text",
                               text: {
                                 replyTo: 201,
-                                body: "keybase blackbox canary ok",
+                                body: "keybase blackbox canary ok keybase-canary-1776994600000",
                               },
                             },
                           },
@@ -302,7 +339,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
           status: "passed",
           details: expect.objectContaining({
             ackReactionBody: ":eyes:",
-            replyPreview: "keybase blackbox canary ok",
+            replyPreview: "keybase blackbox canary ok keybase-canary-1776994600000",
             sentMessageId: "201",
           }),
         }),
@@ -342,6 +379,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
           outputDir,
           scenarioIds: ["command-advertisements", "chunked-commands"],
           team: "lbottest",
+          timings: TEST_TIMINGS,
         },
         {
           async runCommand(_command, args) {
@@ -353,7 +391,10 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
                   : "lbottestbot\n",
               };
             }
-            if (args.includes("channels") && args.includes("status")) {
+            if (args.join(" ").includes("chat api-listen")) {
+              return { stderr: "", stdout: "" };
+            }
+            if (isChannelStatusProbe(args)) {
               return {
                 stderr: "",
                 stdout: JSON.stringify({
@@ -539,6 +580,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
           outputDir,
           scenarioIds: ["dm-canary", "dm-pairing"],
           team: "lbottest",
+          timings: TEST_TIMINGS,
         },
         {
           async runCommand(_command, args) {
@@ -550,7 +592,10 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
                   : "lbottestbot\n",
               };
             }
-            if (args.includes("channels") && args.includes("status")) {
+            if (args.join(" ").includes("chat api-listen")) {
+              return { stderr: "", stdout: "" };
+            }
+            if (isChannelStatusProbe(args)) {
               return {
                 stderr: "",
                 stdout: JSON.stringify({
@@ -632,7 +677,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
                               type: "text",
                               text: {
                                 replyTo: 301,
-                                body: "keybase dm canary ok",
+                                body: "keybase dm canary ok keybase-dm-canary-1776994700000",
                               },
                             },
                           },
@@ -669,7 +714,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
           id: "dm-canary",
           status: "passed",
           details: expect.objectContaining({
-            replyPreview: "keybase dm canary ok",
+            replyPreview: "keybase dm canary ok keybase-dm-canary-1776994700000",
             senderUsername: "lbottestuser2",
             sentMessageId: "301",
           }),
@@ -711,6 +756,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
           outputDir,
           scenarioIds: ["subagents-list"],
           team: "lbottest",
+          timings: TEST_TIMINGS,
         },
         {
           async runCommand(_command, args) {
@@ -722,7 +768,10 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
                   : "lbottestbot\n",
               };
             }
-            if (args.includes("channels") && args.includes("status")) {
+            if (args.join(" ").includes("chat api-listen")) {
+              return { stderr: "", stdout: "" };
+            }
+            if (isChannelStatusProbe(args)) {
               return {
                 stderr: "",
                 stdout: JSON.stringify({
@@ -847,6 +896,18 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
     await writeKeybaseDockerSmokeFiles({
       outputDir,
     });
+    const staleSessionPath = path.join(
+      outputDir,
+      "state",
+      "home",
+      ".openclaw",
+      "agents",
+      "main",
+      "sessions",
+      "stale.jsonl",
+    );
+    await mkdir(path.dirname(staleSessionPath), { recursive: true });
+    await writeFile(staleSessionPath, "NO_REPLY\n", "utf8");
     const now = vi.spyOn(Date, "now").mockReturnValue(1_776_995_000_000);
     let readAttempts = 0;
 
@@ -857,6 +918,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
           outputDir,
           scenarioIds: ["subagents-spawn"],
           team: "lbottest",
+          timings: TEST_TIMINGS,
         },
         {
           async runCommand(_command, args) {
@@ -868,7 +930,10 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
                   : "lbottestbot\n",
               };
             }
-            if (args.includes("channels") && args.includes("status")) {
+            if (args.join(" ").includes("chat api-listen")) {
+              return { stderr: "", stdout: "" };
+            }
+            if (isChannelStatusProbe(args)) {
               return {
                 stderr: "",
                 stdout: JSON.stringify({
@@ -971,6 +1036,7 @@ describe("runKeybaseDockerBlackboxSmoke", () => {
 
       expect(result.passed).toBe(1);
       expect(result.failed).toBe(0);
+      expect(await pathExists(staleSessionPath)).toBe(false);
       expect(readAttempts).toBeGreaterThanOrEqual(1);
       expect(result.scenarios).toEqual([
         expect.objectContaining({

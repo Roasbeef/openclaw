@@ -157,6 +157,16 @@ describe("generated Docker entrypoint", () => {
       stderr: "",
     });
   });
+
+  it("executes far enough to validate generated imports", async () => {
+    await expect(
+      execFileAsync(process.execPath, ["extensions/keybase/docker/container-entrypoint.mjs"], {
+        cwd: process.cwd(),
+      }),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Missing container command"),
+    });
+  });
 });
 
 describe("applyKeybaseContainerConfig", () => {
@@ -216,6 +226,67 @@ describe("applyKeybaseContainerConfig", () => {
         auth: {
           token: "secret",
         },
+      },
+    });
+  });
+
+  it("strips gateway.controlUi.allowInsecureAuth alongside gateway.auth.allowInsecureAuth", () => {
+    const next = applyKeybaseContainerConfig(
+      {
+        gateway: {
+          auth: {
+            allowInsecureAuth: true,
+          },
+          bind: "lan",
+          controlUi: {
+            allowInsecureAuth: true,
+          },
+        },
+      },
+      {
+        autoOneshot: true,
+        binary: "keybase",
+        configPath: "/tmp/openclaw.json",
+        homeDir: "/home/node",
+        pidFile: "/tmp/openclaw-keybase/keybased.pid",
+        runtimeDir: "/tmp/openclaw-keybase",
+        socketFile: "/tmp/openclaw-keybase/keybased.sock",
+        tmpDir: "/tmp/openclaw-tmp",
+        username: "claw_ll",
+      },
+    );
+
+    expect(next.gateway).toEqual({
+      bind: "lan",
+    });
+  });
+
+  it("preserves a non-empty gateway.controlUi block when only allowInsecureAuth is stripped", () => {
+    const next = applyKeybaseContainerConfig(
+      {
+        gateway: {
+          controlUi: {
+            allowInsecureAuth: true,
+            sessionMaxAgeMs: 3600000,
+          },
+        },
+      },
+      {
+        autoOneshot: true,
+        binary: "keybase",
+        configPath: "/tmp/openclaw.json",
+        homeDir: "/home/node",
+        pidFile: "/tmp/openclaw-keybase/keybased.pid",
+        runtimeDir: "/tmp/openclaw-keybase",
+        socketFile: "/tmp/openclaw-keybase/keybased.sock",
+        tmpDir: "/tmp/openclaw-tmp",
+        username: "claw_ll",
+      },
+    );
+
+    expect(next.gateway).toEqual({
+      controlUi: {
+        sessionMaxAgeMs: 3600000,
       },
     });
   });
@@ -319,11 +390,50 @@ describe("prepareKeybaseContainer", () => {
         enabled: true,
         groupPolicy: "allowlist",
         homeDir: path.join(rootDir, "keybase-home"),
+        paperKeyFile: paperKeyPath,
         pidFile: path.join(rootDir, "runtime", "keybased.pid"),
         socketFile: path.join(rootDir, "runtime", "keybased.sock"),
         username: "claw_ll",
       },
     });
+  });
+
+  it("materializes direct paper key env into a runtime paper key file", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "keybase-container-entrypoint-"));
+    cleanups.push(async () => {
+      await rm(rootDir, { recursive: true, force: true });
+    });
+
+    const runtimeDir = path.join(rootDir, "runtime");
+    const configPath = path.join(rootDir, "openclaw.json");
+    const spawnMock = vi.fn();
+
+    await prepareKeybaseContainer(
+      {
+        autoOneshot: false,
+        binary: "keybase",
+        configPath,
+        homeDir: path.join(rootDir, "keybase-home"),
+        paperKey: "direct paper key",
+        pidFile: path.join(runtimeDir, "keybased.pid"),
+        runtimeDir,
+        socketFile: path.join(runtimeDir, "keybased.sock"),
+        tmpDir: path.join(rootDir, "openclaw-tmp"),
+        username: "claw_ll",
+      },
+      {
+        spawn: spawnMock as never,
+      },
+    );
+
+    const runtimePaperKeyFile = path.join(runtimeDir, "keybase-paperkey");
+    const written = JSON.parse(await readFile(configPath, "utf8")) as {
+      channels?: { keybase?: Record<string, unknown> };
+    };
+    expect(written.channels?.keybase?.paperKey).toBeUndefined();
+    expect(written.channels?.keybase?.paperKeyFile).toBe(runtimePaperKeyFile);
+    expect(await readFile(runtimePaperKeyFile, "utf8")).toBe("direct paper key\n");
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it("skips service bootstrap when credentials are absent", async () => {
@@ -584,6 +694,22 @@ describe("findLingeringKeybasePids (H-8)", () => {
     });
 
     const pids = await findLingeringKeybasePids("/usr/bin/keybase", "/home/node", fs as never);
+    expect(pids).toEqual([200]);
+  });
+
+  it("matches descendant processes when the configured binary is relative", async () => {
+    spyPid(100);
+    const fs = procFs({
+      100: { ppid: 0, exe: process.execPath },
+      200: {
+        ppid: 100,
+        exe: "/usr/bin/keybase",
+        cmdline: "/usr/bin/keybase\0service\0",
+        environ: "KEYBASE_HOME=/home/node\0OTHER=1\0",
+      },
+    });
+
+    const pids = await findLingeringKeybasePids("keybase", "/home/node", fs as never);
     expect(pids).toEqual([200]);
   });
 

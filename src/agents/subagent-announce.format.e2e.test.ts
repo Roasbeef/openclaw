@@ -614,6 +614,10 @@ describe("subagent announce formatting", () => {
       sourceTool: "subagent_announce",
     });
     expect(msg).toContain("final answer: 2");
+    expect(msg).toContain(`Do not reply ${SILENT_REPLY_TOKEN} or otherwise stay silent`);
+    expect(msg).toContain(
+      "if the task asked to reply exactly, send the exact result text verbatim",
+    );
     expect(msg).not.toContain("✅ Subagent");
   });
 

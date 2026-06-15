@@ -53,9 +53,40 @@ export type KeybaseApprovalReactionResolution = {
 type KeybaseApprovalReactionTarget = {
   approvalId: string;
   allowedDecisions: readonly ExecApprovalReplyDecision[];
+  expiresAtMs: number;
 };
 
+// M-2: bound the registry. A real approval window is short — a one-hour TTL
+// is comfortably above any reasonable approval expiry, and a 1024-entry cap
+// is well above any plausible concurrent-approval load while still preventing
+// monotonic growth from gateway crashes or pathological reaction spam.
+const KEYBASE_APPROVAL_REACTION_TTL_MS = 60 * 60 * 1000;
+const KEYBASE_APPROVAL_REACTION_MAX_ENTRIES = 1024;
+
+// JS Map iteration order is insertion order. We exploit that for cheap LRU:
+// every read/write deletes-then-sets the entry, so the oldest entry is the
+// first one returned by keys().next().
 const keybaseApprovalReactionTargets = new Map<string, KeybaseApprovalReactionTarget>();
+
+let keybaseApprovalReactionNowMs: () => number = () => Date.now();
+
+function pruneExpiredKeybaseApprovalReactionTargets(nowMs: number): void {
+  for (const [key, target] of keybaseApprovalReactionTargets) {
+    if (target.expiresAtMs <= nowMs) {
+      keybaseApprovalReactionTargets.delete(key);
+    }
+  }
+}
+
+function evictKeybaseApprovalReactionTargetsToCap(): void {
+  while (keybaseApprovalReactionTargets.size > KEYBASE_APPROVAL_REACTION_MAX_ENTRIES) {
+    const oldestKey = keybaseApprovalReactionTargets.keys().next().value;
+    if (oldestKey === undefined) {
+      return;
+    }
+    keybaseApprovalReactionTargets.delete(oldestKey);
+  }
+}
 
 function normalizeTargetKey(target: string): string | null {
   const groupKey = normalizeKeybaseGroupKey(target);
@@ -153,10 +184,17 @@ export function registerKeybaseApprovalReactionTarget(params: {
   if (!key || !approvalId || allowedDecisions.length === 0) {
     return;
   }
+  const nowMs = keybaseApprovalReactionNowMs();
+  pruneExpiredKeybaseApprovalReactionTargets(nowMs);
+  // Re-insert to refresh insertion order so this entry becomes the most
+  // recently used and won't be the first evicted.
+  keybaseApprovalReactionTargets.delete(key);
   keybaseApprovalReactionTargets.set(key, {
     approvalId,
     allowedDecisions,
+    expiresAtMs: nowMs + KEYBASE_APPROVAL_REACTION_TTL_MS,
   });
+  evictKeybaseApprovalReactionTargetsToCap();
 }
 
 export function unregisterKeybaseApprovalReactionTarget(params: {
@@ -194,6 +232,8 @@ export function resolveKeybaseApprovalReactionTarget(params: {
     ...normalized.filter((entry) => !entry.isConv && !entry.isImplicitTeam),
     ...(hasConvCandidate ? [] : normalized.filter((entry) => entry.isImplicitTeam)),
   ];
+  const nowMs = keybaseApprovalReactionNowMs();
+  pruneExpiredKeybaseApprovalReactionTargets(nowMs);
   for (const entry of ordered) {
     const key = buildReactionTargetKey({
       accountId: params.accountId,
@@ -225,4 +265,12 @@ export function resolveKeybaseApprovalReactionTarget(params: {
 
 export function clearKeybaseApprovalReactionTargetsForTest(): void {
   keybaseApprovalReactionTargets.clear();
+  keybaseApprovalReactionNowMs = () => Date.now();
 }
+
+export function setKeybaseApprovalReactionNowMsForTest(now: () => number): void {
+  keybaseApprovalReactionNowMs = now;
+}
+
+export const KEYBASE_APPROVAL_REACTION_TTL_MS_FOR_TEST = KEYBASE_APPROVAL_REACTION_TTL_MS;
+export const KEYBASE_APPROVAL_REACTION_MAX_ENTRIES_FOR_TEST = KEYBASE_APPROVAL_REACTION_MAX_ENTRIES;
